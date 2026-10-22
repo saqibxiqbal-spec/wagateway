@@ -19,6 +19,7 @@ const { WaManager } = require('./wa/manager');
 const { attachSocket } = require('./socket');
 const authRoutes = require('./routes/auth');
 const sessionRoutes = require('./routes/sessions');
+const quickRoutes = require('./routes/quick');
 
 // --- global outbound fetch guard (same idea as the bot) ---------------------
 (() => {
@@ -66,13 +67,14 @@ function createApp(wa) {
   // --- API -----------------------------------------------------------------
   app.use('/api/auth', authRoutes);
   app.use('/api/sessions', sessionRoutes);
+  app.use('/api/quick', quickRoutes);
 
   app.use('/api', (_req, res) => res.status(404).json({ ok: false, error: 'Not found.' }));
 
   // --- static frontend -----------------------------------------------------
   if (config.SERVE_WEB) {
     const webDir = path.join(__dirname, '..', 'web');
-    app.use(express.static(webDir, { maxAge: '1h', index: 'index.html' }));
+    app.use(express.static(webDir, { maxAge: '1h', index: 'quick.html' }));
     // SPA fallback for non-API GETs
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
