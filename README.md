@@ -128,6 +128,15 @@ docker build -t wagateway .
 docker run -p 3000:3000 --env-file .env wagateway
 ```
 
+### Render (recommended — free tier, one click)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/saqibxiqbal-spec/wagateway)
+
+`render.yaml` is included. Click the button, sign in with GitHub, paste your
+`MONGODB_URI` when prompted — Render generates `JWT_SECRET` for you and gives
+you a permanent `https://wagateway-xxxx.onrender.com` URL. WebSockets are
+supported on the free plan.
+
 ### Railway
 
 `railway.json` is included (Nixpacks, `node server/index.js`, health check
