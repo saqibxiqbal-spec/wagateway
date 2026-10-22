@@ -596,8 +596,26 @@
     socket.on('disconnected', () => { loadSessions(); });
   }
 
+  // ------------------------------------------------------------------ offline banner
+  // When the static build is hosted without the API (e.g. a preview deploy),
+  // say so plainly instead of letting buttons fail silently.
+  async function checkBackend() {
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store' });
+      if (!res.ok) throw new Error('down');
+      const json = await res.json();
+      if (!json.ok) throw new Error('down');
+    } catch {
+      const bar = document.createElement('div');
+      bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:200;background:#2a1a06;border-top:1px solid rgba(245,165,36,.45);color:#ffd08a;font-size:13px;padding:10px 16px;text-align:center;font-family:inherit';
+      bar.innerHTML = '⚠️ <b>Preview mode</b> — backend not connected on this host. Run <code>npm start</code> locally or deploy the server to pair a real number.';
+      document.body.appendChild(bar);
+    }
+  }
+
   // ------------------------------------------------------------------ boot
   $('#year').textContent = new Date().getFullYear();
+  checkBackend();
   if (store.token && (!location.hash || location.hash === '#/' || location.hash === '')) {
     location.hash = '#/app';
   }

@@ -1,0 +1,32 @@
+# Render Blueprint — one-click deploy.
+#   1. Push this repo to GitHub (already done).
+#   2. Open: https://render.com/deploy?repo=https://github.com/saqibxiqbal-spec/wagateway
+#   3. Paste your MongoDB URI when prompted. Everything else is automatic.
+services:
+  - type: web
+    name: wagateway
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: npm install --omit=dev
+    startCommand: node server/index.js
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_DB
+        value: wagateway
+      - key: SERVE_WEB
+        value: "true"
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: MAX_SESSIONS_PER_USER
+        value: "10"
+      - key: DEFAULT_COUNTRY_CODE
+        value: "92"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: MONGODB_URI
+        sync: false          # you paste this in the Render dashboard
