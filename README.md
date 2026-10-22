@@ -161,3 +161,15 @@ Put it behind Nginx/Caddy with TLS. Socket.io needs WebSocket upgrade headers.
   shared session lock (not included).
 - Media sending/receiving is intentionally out of scope — this is a **pairing
   and session gateway**, not a full bot.
+
+---
+
+## Screenshots
+
+| Landing | Pairing code |
+|---|---|
+| ![landing](docs/01-landing.png) | ![pairing](docs/02-pairing-code.png) |
+
+| Live QR | Dashboard |
+|---|---|
+| ![qr](docs/03-qr.png) | ![dashboard](docs/04-dashboard.png) |
