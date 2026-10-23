@@ -160,6 +160,8 @@
     return data;
   }
 
+  let qrTimer = null;
+
   async function loadQr() {
     if (!sid) return;
     try {
@@ -169,6 +171,16 @@
       $('#qrBox').innerHTML = '<span style="color:#888;font-size:12px">QR tayyar nahi — pairing code use karein</span>';
     }
   }
+
+  // WhatsApp rotates the QR roughly every 20s. Refresh the image on the same
+  // cadence so the code on screen is never stale.
+  function startQrRefresh() {
+    stopQrRefresh();
+    qrTimer = setInterval(() => {
+      if ($('#paneQr') && !$('#paneQr').classList.contains('hidden')) loadQr();
+    }, 12000);
+  }
+  function stopQrRefresh() { if (qrTimer) { clearInterval(qrTimer); qrTimer = null; } }
 
   function stopPoll() { if (poll) { clearInterval(poll); poll = null; } }
 
@@ -219,16 +231,30 @@
     if (!n) return err($('#err1'), 'Pehle number likhein.');
     generate(n);
   });
+
+  // ?n=923001234567&qr=1  -> one-click start, straight on the QR tab.
+  // Handy when the pairing-code path is rejected by WhatsApp.
+  (function autoStart() {
+    const q = new URLSearchParams(location.search);
+    const n = (q.get('n') || '').replace(/[^\d+]/g, '');
+    if (!n) return;
+    $('#num').value = n;
+    const wantQr = q.get('qr') === '1' || q.get('qr') === 'true';
+    generate(n).then(() => {
+      if (wantQr) $('#tabQr').click();
+    });
+  })();
   $('#num').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#go').click(); });
 
   $('#tabCode').addEventListener('click', () => {
     $('#tabCode').classList.add('on'); $('#tabQr').classList.remove('on');
     $('#paneCode').classList.remove('hidden'); $('#paneQr').classList.add('hidden');
+    stopQrRefresh();
   });
   $('#tabQr').addEventListener('click', () => {
     $('#tabQr').classList.add('on'); $('#tabCode').classList.remove('on');
     $('#paneQr').classList.remove('hidden'); $('#paneCode').classList.add('hidden');
-    loadQr();
+    loadQr(); startQrRefresh();
   });
 
   $('#again').addEventListener('click', async () => {

@@ -108,6 +108,10 @@ async function main() {
   const resumed = await wa.resumeAll();
   if (resumed) console.log(`[wa] resumed ${resumed} session(s)`);
 
+  // Keep every linked number online, not just at boot.
+  wa.startWatchdog(30_000);
+  console.log('[wa] watchdog started (30s)');
+
   // --- graceful shutdown ---------------------------------------------------
   let closing = false;
   const shutdown = async (signal) => {

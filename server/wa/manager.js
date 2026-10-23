@@ -506,6 +506,48 @@ class WaManager extends EventEmitter {
     await this.startSocket(doc);
   }
 
+  /**
+   * Keep linked sessions alive.
+   *
+   * A session that has `me` set is a real, linked device. If its socket is not
+   * in `this.runtimes` (dropped by a network blip, a 401 retry, a container
+   * restart) the number silently stops answering commands. This loop notices
+   * that within 30s and brings it back — that is what "stays active" means in
+   * practice.
+   */
+  startWatchdog(intervalMs = 30_000) {
+    if (this._watchdog) return this._watchdog;
+    this._watchdog = setInterval(async () => {
+      if (this._shuttingDown) return;
+      try {
+        const docs = await this.col
+          .find({
+            me: { $ne: null },
+            status: { $nin: [STATUS.LOGGED_OUT] },
+          })
+          .toArray();
+        for (const doc of docs) {
+          const sid = String(doc._id);
+          if (this.runtimes.has(sid)) continue;
+          logger.warn({ sid, number: doc.number, status: doc.status }, 'watchdog: reviving linked session');
+          await this.logEvent(doc._id, 'watchdog_revive', { status: doc.status });
+          await this.startSocket({ ...doc, status: STATUS.CONNECTING });
+        }
+      } catch (err) {
+        logger.warn({ err: err.message }, 'watchdog tick failed');
+      }
+    }, intervalMs);
+    if (this._watchdog.unref) this._watchdog.unref();
+    return this._watchdog;
+  }
+
+  stopWatchdog() {
+    if (this._watchdog) {
+      clearInterval(this._watchdog);
+      this._watchdog = null;
+    }
+  }
+
   /** Reconnect every session that was connected when the process died. */
   async resumeAll() {
     // ERROR is included on purpose: a redeploy can interrupt a Mongo write and
