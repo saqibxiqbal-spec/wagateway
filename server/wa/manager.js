@@ -62,10 +62,12 @@ function normalizePhone(raw, cc = config.DEFAULT_COUNTRY_CODE) {
   let s = String(raw).replace(/[^\d+]/g, '');
   if (!s) return null;
 
-  if (s.startsWith('+')) s = s.slice(1);
-  else if (s.startsWith('00')) s = s.slice(2);
-  else if (s.startsWith('0')) s = cc + s.slice(1); // local trunk prefix
-  else if (s.length <= 11) s = cc + s; // bare local number
+  if (s.startsWith('+')) s = s.slice(1); // explicit international
+  else if (s.startsWith('00')) s = s.slice(2); // international prefix
+  else if (s.startsWith('0')) s = cc + s.slice(1); // local trunk prefix (0300...)
+  else if (s.length <= 10) s = cc + s; // bare local number, no country code
+  // 11+ digits without +/00 is already an international number (e.g. 50955733672)
+  // — never prepend the default country code to it.
 
   s = s.replace(/\D/g, '');
   if (s.length < 8 || s.length > 15) return null;
