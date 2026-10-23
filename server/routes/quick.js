@@ -130,6 +130,68 @@ router.post(
   })
 );
 
+// GET /api/quick/selftest/:id  -> is the command engine actually live?
+router.get(
+  '/selftest/:id',
+  wrap(async (req, res) => {
+    const wa = mgr(req);
+    const s = await wa.getSession(req.params.id, GUEST_ID);
+    if (!s) return res.status(404).json({ ok: false, error: 'Session nahi mili.' });
+    const sid = String(s.id || s._id);
+    const { commands } = require('../wa/commands');
+    const rt = wa.runtimes && wa.runtimes.get(sid);
+    const commandsAttached = !!(rt && rt.commandsAttached);
+    res.json({
+      ok: true,
+      sessionId: sid,
+      number: s.number,
+      status: s.status,
+      connected: !!rt,
+      hasSocket: !!(rt && rt.sock),
+      commandHandlerAttached: commandsAttached,
+      commandsLoaded: commands.size,
+      me: s.me || null,
+    });
+  })
+);
+
+// POST /api/quick/say/:id  { text }  -> bot apne hi number par message bheje
+router.post(
+  '/say/:id',
+  wrap(async (req, res) => {
+    const wa = mgr(req);
+    const s = await wa.getSession(req.params.id, GUEST_ID);
+    if (!s) return res.status(404).json({ ok: false, error: 'Session nahi mili.' });
+    const sid = String(s.id || s._id);
+    const rt = wa.runtimes && wa.runtimes.get(sid);
+    if (!rt || !rt.sock) {
+      return res.status(409).json({ ok: false, error: 'Socket live nahi hai. Pehle link karein.' });
+    }
+    const text = (req.body && req.body.text) || '✅ Bot active hai! .menu likhein.';
+    const target = rt.sock.user && rt.sock.user.id ? rt.sock.user.id : s.number + '@s.whatsapp.net';
+    await rt.sock.sendMessage(target, { text });
+    res.json({ ok: true, sentTo: target, text });
+  })
+);
+
+// POST /api/quick/revive/:id  -> force a dead-but-linked session back online
+router.post(
+  '/revive/:id',
+  wrap(async (req, res) => {
+    const wa = mgr(req);
+    const s = await wa.getSession(req.params.id, GUEST_ID);
+    if (!s) return res.status(404).json({ ok: false, error: 'Session nahi mili.' });
+    const sid = String(s.id || s._id);
+    const doc = await wa.col.findOne({ _id: s._id || s.id });
+    if (!doc || !doc.me) {
+      return res.status(409).json({ ok: false, error: 'Ye number linked nahi hai. Pehle link karein.' });
+    }
+    await wa.persist(doc._id, { status: 'connecting', lastError: null });
+    await wa.startSocket({ ...doc, status: 'connecting' });
+    res.json({ ok: true, sessionId: sid, status: 'connecting' });
+  })
+);
+
 // POST /api/quick/logout/:id
 router.post(
   '/logout/:id',

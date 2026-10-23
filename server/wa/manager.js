@@ -296,6 +296,9 @@ class WaManager extends EventEmitter {
     try {
       ({ state, saveCreds } = await useMongoAuthState(sessionId));
     } catch (err) {
+      // A shutdown mid-read is not a real failure — leave the row alone so the
+      // next boot resumes it instead of parking the session as `error`.
+      if (this._shuttingDown) return null;
       await this.persist(doc._id, { status: STATUS.ERROR, lastError: 'auth state: ' + err.message });
       return null;
     }
@@ -338,6 +341,7 @@ class WaManager extends EventEmitter {
         getMessage: async () => undefined,
       });
     } catch (err) {
+      if (this._shuttingDown) return null;
       await this.persist(doc._id, { status: STATUS.ERROR, lastError: 'socket: ' + err.message });
       return null;
     }
@@ -399,6 +403,7 @@ class WaManager extends EventEmitter {
         logger,
         onEvent: (e) => this.emit('command', { sessionId, ...e }),
       });
+      runtime.commandsAttached = true;
     } catch (err) {
       logger.warn({ err: err.message }, 'attachCommands failed');
     }
@@ -503,8 +508,15 @@ class WaManager extends EventEmitter {
 
   /** Reconnect every session that was connected when the process died. */
   async resumeAll() {
+    // ERROR is included on purpose: a redeploy can interrupt a Mongo write and
+    // leave a perfectly-linked session parked as `error`. Skipping it would
+    // mean a linked number silently stops working after every deploy.
     const docs = await this.col
-      .find({ status: { $in: [STATUS.CONNECTED, STATUS.CONNECTING, STATUS.PAIRING] } })
+      .find({
+        status: {
+          $in: [STATUS.CONNECTED, STATUS.CONNECTING, STATUS.PAIRING, STATUS.ERROR],
+        },
+      })
       .toArray();
     let resumed = 0;
     for (const doc of docs) {
