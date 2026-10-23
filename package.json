@@ -2,13 +2,14 @@
   "name": "wagateway",
   "version": "1.0.0",
   "private": true,
-  "description": "WA Gateway — multi-tenant WhatsApp multi-device pairing SaaS (Baileys + Express + Socket.io + MongoDB)",
+  "description": "WA Gateway \u2014 multi-tenant WhatsApp multi-device pairing SaaS (Baileys + Express + Socket.io + MongoDB)",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "seed": "node server/scripts/seed.js",
-    "smoke": "node server/scripts/smoke.js"
+    "smoke": "node server/scripts/smoke.js",
+    "test:commands": "node test-selfchat.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

@@ -76,9 +76,11 @@ router.post(
       number,
       code: result.code || null,
       pending: !!result.pending,
+      alreadyConnected: !!result.alreadyConnected,
       message: result.message || null,
       status: fresh ? fresh.status : 'pairing',
       qr: fresh ? !!fresh.hasQr : false,
+      me: fresh ? fresh.me || null : null,
     });
   })
 );
@@ -99,6 +101,7 @@ router.get(
       me: s.me || null,
       pushName: s.pushName || null,
       lastError: s.lastError || null,
+      live: !!(wa.runtimes && wa.runtimes.get(String(s.id || s._id))),
     });
   })
 );
@@ -141,6 +144,7 @@ router.get(
     const { commands } = require('../wa/commands');
     const rt = wa.runtimes && wa.runtimes.get(sid);
     const commandsAttached = !!(rt && rt.commandsAttached);
+    const doc = await wa.col.findOne({ _id: s._id || s.id });
     res.json({
       ok: true,
       sessionId: sid,
@@ -150,6 +154,9 @@ router.get(
       hasSocket: !!(rt && rt.sock),
       commandHandlerAttached: commandsAttached,
       commandsLoaded: commands.size,
+      selfChatReady: commandsAttached,
+      leaseOwner: doc ? doc.lockOwner || null : null,
+      thisInstance: wa.instanceId || null,
       me: s.me || null,
     });
   })

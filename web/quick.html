@@ -52,7 +52,6 @@
   .foot{text-align:center;color:#4a5b72;font-size:11.5px;margin-top:18px}
   @media(max-width:520px){.card{padding:20px}.ch{width:38px;height:50px;font-size:21px}.field{flex-direction:column}.btn{width:100%}}
 </style>
-<script src="https://sites.super.myninja.ai/_assets/ninja-daytona-script.js"></script>
 </head>
 <body>
 <div class="wrap">
@@ -212,6 +211,14 @@
     try {
       const d = await api('POST', '/api/quick/pair', { number });
       sid = d.sessionId;
+
+      // Already linked: do NOT show a pairing screen, the bot is live.
+      if (d.alreadyConnected || d.status === 'connected') {
+        $('#okTxt').textContent = (d.me && d.me.name ? d.me.name + ' ' : '') + '— ye number pehle se linked hai, bot chal raha hai.';
+        show(v3);
+        return;
+      }
+
       show(v2);
       $('#status').querySelector('.spin').style.display = '';
       $('#statusTxt').textContent = 'Phone ka intezaar…';

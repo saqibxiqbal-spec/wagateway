@@ -7,11 +7,16 @@
  *
  * Design notes:
  *  - Prefix is configurable (default "."), also accepts "/" and "!".
- *  - Ignores messages sent by the bot itself so it can never loop.
+ *  - SELF-CHAT SUPPORT: a linked device receives its own messages with
+ *    `key.fromMe = true`. The public page tells users to type commands in the
+ *    "Message yourself" chat, so those messages MUST be processed. We keep a
+ *    bounded set of message ids the bot itself sent and skip only those, which
+ *    makes self-chat work without ever creating a reply loop.
  *  - Every reply is wrapped so one failing command can't kill the socket.
- *  - Works in DMs and groups. Group commands need the bot to be mentioned
- *    only for the heavy ones (tagall), normal commands work anywhere.
+ *  - Works in DMs and groups.
  */
+
+const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 
 const PREFIXES = ['.', '/', '!', '#'];
 const BOT_NAME = 'SAQIB MD';
@@ -66,6 +71,25 @@ function getContextInfo(msg) {
   );
 }
 
+/** Bounded FIFO set — remembers which messages the bot sent / already handled. */
+class IdSet {
+  constructor(max = 400) {
+    this.max = max;
+    this.set = new Set();
+  }
+  add(id) {
+    if (!id) return;
+    this.set.add(id);
+    if (this.set.size > this.max) {
+      const first = this.set.values().next().value;
+      this.set.delete(first);
+    }
+  }
+  has(id) {
+    return this.set.has(id);
+  }
+}
+
 /* --------------------------------------------------------------- commands */
 
 const commands = new Map();
@@ -85,23 +109,23 @@ cmd(['menu', 'help', 'commands', 'list'], {
   }
   const order = ['main', 'general', 'tools', 'group', 'owner'];
   const titles = {
-    main: '📋 MAIN',
-    general: '💬 GENERAL',
-    tools: '🛠️ TOOLS',
-    group: '👥 GROUP',
-    owner: '👑 OWNER',
+    main: '\ud83d\udccb MAIN',
+    general: '\ud83d\udcac GENERAL',
+    tools: '\ud83d\udee0\ufe0f TOOLS',
+    group: '\ud83d\udc65 GROUP',
+    owner: '\ud83d\udc51 OWNER',
   };
-  let out = `╭━━━〔 *${BOT_NAME}* 〕━━━╮\n`;
-  out += `┃ 🤖 Bot: *Online*\n`;
-  out += `┃ ⏱️ Uptime: ${humanUptime(Date.now() - startedAt)}\n`;
-  out += `┃ 🔧 Prefix: . / ! #\n`;
-  out += `╰━━━━━━━━━━━━━━━━━━╯\n`;
+  let out = `\u256d\u2501\u2501\u2501\u3014 *${BOT_NAME}* \u3015\u2501\u2501\u2501\u256e\n`;
+  out += `\u2503 \ud83e\udd16 Bot: *Online*\n`;
+  out += `\u2503 \u23f1\ufe0f Uptime: ${humanUptime(Date.now() - startedAt)}\n`;
+  out += `\u2503 \ud83d\udd27 Prefix: . / ! #\n`;
+  out += `\u2570\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u256f\n`;
   for (const key of order) {
     if (!groups[key]) continue;
     out += `\n*${titles[key]}*\n`;
     const names = [...new Set(groups[key])].sort();
     for (const n of names) {
-      out += `• .${n} — ${commands.get(n).desc}\n`;
+      out += `\u2022 .${n} \u2014 ${commands.get(n).desc}\n`;
     }
   }
   out += `\n_Total ${commands.size} commands_`;
@@ -110,111 +134,111 @@ cmd(['menu', 'help', 'commands', 'list'], {
 
 cmd(['ping', 'speed'], { category: 'main', desc: 'Bot ki speed check karein' }, async (ctx) => {
   const t = Date.now();
-  await ctx.reply('🏓 Pinging...');
-  return `🏓 *Pong!*\n⚡ Speed: *${Date.now() - t} ms*`;
+  await ctx.reply('\ud83c\udfd3 Pinging...');
+  return `\ud83c\udfd3 *Pong!*\n\u26a1 Speed: *${Date.now() - t} ms*`;
 });
 
 cmd(['alive', 'active', 'online'], { category: 'main', desc: 'Bot zinda hai ya nahi' }, async () => {
   return (
-    `✅ *${BOT_NAME} is ALIVE*\n\n` +
-    `⏱️ Uptime: ${humanUptime(Date.now() - startedAt)}\n` +
-    `💾 Memory: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(1)} MB\n` +
-    `🟢 Status: Connected\n` +
-    `📅 ${new Date().toUTCString()}`
+    `\u2705 *${BOT_NAME} is ALIVE*\n\n` +
+    `\u23f1\ufe0f Uptime: ${humanUptime(Date.now() - startedAt)}\n` +
+    `\ud83d\udcbe Memory: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(1)} MB\n` +
+    `\ud83d\udfe2 Status: Connected\n` +
+    `\ud83d\udcc5 ${new Date().toUTCString()}`
   );
 });
 
 cmd(['uptime', 'runtime'], { category: 'main', desc: 'Bot kitni der se chal raha hai' }, async () => {
-  return `⏱️ *Uptime:* ${humanUptime(Date.now() - startedAt)}`;
+  return `\u23f1\ufe0f *Uptime:* ${humanUptime(Date.now() - startedAt)}`;
 });
 
 cmd(['id', 'myid', 'jid'], { category: 'general', desc: 'Aapki WhatsApp ID' }, async (ctx) => {
-  return `🆔 *Your ID*\n\n👤 You: \`${ctx.sender}\`\n💬 Chat: \`${ctx.chat}\`\n🤖 Bot: \`${ctx.botJid}\``;
+  return `\ud83c\udd94 *Your ID*\n\n\ud83d\udc64 You: \`${ctx.sender}\`\n\ud83d\udcac Chat: \`${ctx.chat}\`\n\ud83e\udd16 Bot: \`${ctx.botJid}\``;
 });
 
 cmd(['owner', 'creator', 'dev'], { category: 'owner', desc: 'Bot owner ki info' }, async () => {
-  return `👑 *Owner*\n\n📛 Name: Saqib\n🤖 Bot: ${BOT_NAME}\n🌐 Host: Railway`;
+  return `\ud83d\udc51 *Owner*\n\n\ud83d\udcdb Name: Saqib\n\ud83e\udd16 Bot: ${BOT_NAME}\n\ud83c\udf10 Host: Railway`;
 });
 
 cmd(['info', 'bot', 'about'], { category: 'main', desc: 'Bot ki tafseel' }, async () => {
   return (
-    `🤖 *${BOT_NAME}*\n\n` +
-    `📦 Engine: Baileys Multi-Device\n` +
-    `⚙️ Node: ${process.version}\n` +
-    `🖥️ Platform: ${process.platform}\n` +
-    `⏱️ Uptime: ${humanUptime(Date.now() - startedAt)}\n` +
-    `🔧 Commands: ${commands.size}`
+    `\ud83e\udd16 *${BOT_NAME}*\n\n` +
+    `\ud83d\udce6 Engine: Baileys Multi-Device\n` +
+    `\u2699\ufe0f Node: ${process.version}\n` +
+    `\ud83d\udda5\ufe0f Platform: ${process.platform}\n` +
+    `\u23f1\ufe0f Uptime: ${humanUptime(Date.now() - startedAt)}\n` +
+    `\ud83d\udd27 Commands: ${commands.size}`
   );
 });
 
 cmd(['time'], { category: 'tools', desc: 'Abhi ka waqt' }, async () => {
-  return `🕐 *Time:* ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Karachi' })} (PKT)\n📅 *Date:* ${new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Karachi' })}`;
+  return `\ud83d\udd50 *Time:* ${new Date().toLocaleTimeString('en-GB', { timeZone: 'Asia/Karachi' })} (PKT)\n\ud83d\udcc5 *Date:* ${new Date().toLocaleDateString('en-GB', { timeZone: 'Asia/Karachi' })}`;
 });
 
 cmd(['date'], { category: 'tools', desc: 'Aaj ki tareekh' }, async () => {
-  return `📅 *Date:* ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
+  return `\ud83d\udcc5 *Date:* ${new Date().toLocaleDateString('en-GB', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`;
 });
 
-cmd(['echo', 'say'], { category: 'tools', desc: '.echo <text> — text repeat' }, async (ctx) => {
-  if (!ctx.args.length) return '❌ Misal: .echo Hello world';
+cmd(['echo', 'say'], { category: 'tools', desc: '.echo <text> \u2014 text repeat' }, async (ctx) => {
+  if (!ctx.args.length) return '\u274c Misal: .echo Hello world';
   return ctx.args.join(' ');
 });
 
-cmd(['calc', 'math'], { category: 'tools', desc: '.calc 2+2 — hisaab' }, async (ctx) => {
+cmd(['calc', 'math'], { category: 'tools', desc: '.calc 2+2 \u2014 hisaab' }, async (ctx) => {
   const expr = ctx.args.join(' ');
-  if (!expr) return '❌ Misal: .calc 25*4';
-  if (!/^[\d\s+\-*/().%]+$/.test(expr)) return '❌ Sirf numbers aur + - * / ( ) allowed hain.';
+  if (!expr) return '\u274c Misal: .calc 25*4';
+  if (!/^[\d\s+\-*/().%]+$/.test(expr)) return '\u274c Sirf numbers aur + - * / ( ) allowed hain.';
   try {
     // eslint-disable-next-line no-new-func
     const val = Function(`"use strict";return (${expr})`)();
-    return `🧮 *${expr}* = *${val}*`;
+    return `\ud83e\uddee *${expr}* = *${val}*`;
   } catch {
-    return '❌ Expression theek nahi hai.';
+    return '\u274c Expression theek nahi hai.';
   }
 });
 
 cmd(['joke', 'fun'], { category: 'general', desc: 'Random joke' }, async () => {
   const jokes = [
-    'Teacher: Tumhein sabse zyada kya pasand hai?\nStudent: Homework nahi karna. 😄',
-    'Doctor: Aapko din mein 3 baar dawa lena hai.\nPatient: Subah, dopahar, shaam?\nDoctor: Nahi, breakfast, lunch, dinner. 😂',
-    'WiFi aur rishtedar dono ek jaise hote hain — signal kamzor, demand zyada. 📶',
-    'Mera phone 100% charged hai, bas meri himmat 2% reh gayi hai. 🔋',
+    'Teacher: Tumhein sabse zyada kya pasand hai?\nStudent: Homework nahi karna. \ud83d\ude04',
+    'Doctor: Aapko din mein 3 baar dawa lena hai.\nPatient: Subah, dopahar, shaam?\nDoctor: Nahi, breakfast, lunch, dinner. \ud83d\ude02',
+    'WiFi aur rishtedar dono ek jaise hote hain \u2014 signal kamzor, demand zyada. \ud83d\udcf6',
+    'Mera phone 100% charged hai, bas meri himmat 2% reh gayi hai. \ud83d\udd0b',
   ];
-  return '😄 ' + jokes[Math.floor(Math.random() * jokes.length)];
+  return '\ud83d\ude04 ' + jokes[Math.floor(Math.random() * jokes.length)];
 });
 
 cmd(['quote', 'hadith'], { category: 'general', desc: 'Random quote' }, async () => {
   const q = [
-    'Mehnat itni khamoshi se karo ke kamyabi shor macha de. 💪',
-    'Jo aaj taklif uthata hai, woh kal rahat paata hai. 🌱',
-    'Sabr ka phal meetha hota hai. 🍯',
-    'Ilm hasil karo, kyunke ilm roshni hai. 📚',
+    'Mehnat itni khamoshi se karo ke kamyabi shor macha de. \ud83d\udcaa',
+    'Jo aaj taklif uthata hai, woh kal rahat paata hai. \ud83c\udf31',
+    'Sabr ka phal meetha hota hai. \ud83c\udf6f',
+    'Ilm hasil karo, kyunke ilm roshni hai. \ud83d\udcda',
   ];
-  return '✨ ' + q[Math.floor(Math.random() * q.length)];
+  return '\u2728 ' + q[Math.floor(Math.random() * q.length)];
 });
 
 cmd(['status', 'session'], { category: 'main', desc: 'Session ki health' }, async (ctx) => {
   return (
-    `📊 *Session Status*\n\n` +
-    `✅ Connection: Online\n` +
-    `🆔 Number: ${jidToNumber(ctx.botJid)}\n` +
-    `⏱️ Uptime: ${humanUptime(Date.now() - startedAt)}\n` +
-    `💾 Memory: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(1)} MB\n` +
-    `🔧 Commands: ${commands.size}`
+    `\ud83d\udcca *Session Status*\n\n` +
+    `\u2705 Connection: Online\n` +
+    `\ud83c\udd94 Number: ${jidToNumber(ctx.botJid)}\n` +
+    `\u23f1\ufe0f Uptime: ${humanUptime(Date.now() - startedAt)}\n` +
+    `\ud83d\udcbe Memory: ${(process.memoryUsage().rss / 1024 / 1024).toFixed(1)} MB\n` +
+    `\ud83d\udd27 Commands: ${commands.size}`
   );
 });
 
 cmd(['groupid', 'gid'], { category: 'group', desc: 'Group ki ID' }, async (ctx) => {
-  if (!ctx.isGroup) return '❌ Ye command sirf group mein chalti hai.';
-  return `👥 *Group ID*\n\n\`${ctx.chat}\``;
+  if (!ctx.isGroup) return '\u274c Ye command sirf group mein chalti hai.';
+  return `\ud83d\udc65 *Group ID*\n\n\`${ctx.chat}\``;
 });
 
 cmd(['tagall', 'everyone', 'all'], { category: 'group', desc: 'Group ke sab members ko tag karein' }, async (ctx) => {
-  if (!ctx.isGroup) return '❌ Sirf group mein.';
-  if (!ctx.groupMetadata) return '❌ Group info nahi mili.';
+  if (!ctx.isGroup) return '\u274c Sirf group mein.';
+  if (!ctx.groupMetadata) return '\u274c Group info nahi mili.';
   const members = ctx.groupMetadata.participants || [];
   const text = ctx.args.join(' ') || 'Attention please!';
-  let msg = `📢 *${text}*\n\n`;
+  let msg = `\ud83d\udce2 *${text}*\n\n`;
   const mentions = [];
   for (const p of members) {
     const id = p.id || p.jid;
@@ -228,32 +252,39 @@ cmd(['tagall', 'everyone', 'all'], { category: 'group', desc: 'Group ke sab memb
 
 cmd(['vv', 'viewonce', 'reveal'], { category: 'tools', desc: 'View-once media dobara bhejein (reply karein)' }, async (ctx) => {
   const quoted = ctx.quoted;
-  if (!quoted) return '❌ Kisi view-once media par reply karke .vv likhein.';
+  if (!quoted) return '\u274c Kisi view-once media par reply karke .vv likhein.';
   const m = quoted.message || {};
   const media =
     m.imageMessage || m.videoMessage || m.audioMessage || m.documentMessage;
-  if (!media) return '❌ Quoted message mein media nahi hai.';
+  if (!media) return '\u274c Quoted message mein media nahi hai.';
   try {
-    const buf = await ctx.sock.downloadMediaMessage(quoted);
+    // Baileys 7 exports downloadMediaMessage as a standalone helper; the
+    // socket no longer carries a `downloadMediaMessage` method.
+    const buf = await downloadMediaMessage(
+      quoted,
+      'buffer',
+      {},
+      { logger: ctx.logger || undefined, reuploadRequest: ctx.sock.updateMediaMessage }
+    );
     const kind = m.imageMessage ? 'image' : m.videoMessage ? 'video' : m.audioMessage ? 'audio' : 'document';
     await ctx.sock.sendMessage(ctx.chat, { [kind]: buf, caption: media.caption || '' });
     return null;
   } catch (e) {
-    return '❌ Media download fail: ' + e.message;
+    return '\u274c Media download fail: ' + e.message;
   }
 });
 
-cmd(['save', 'download'], { category: 'tools', desc: 'Quoted media save karein' }, async (ctx) => {
-  return '💾 Media save karne ke liye quoted media par reply karke .vv try karein.';
+cmd(['save', 'download'], { category: 'tools', desc: 'Quoted media save karein' }, async () => {
+  return '\ud83d\udcbe Media save karne ke liye quoted media par reply karke .vv try karein.';
 });
 
 cmd(['report', 'bug'], { category: 'general', desc: 'Bug report' }, async () => {
-  return '🐞 Bug mila? Owner ko batayein: .owner';
+  return '\ud83d\udc1e Bug mila? Owner ko batayein: .owner';
 });
 
 cmd(['hi', 'hello', 'salam'], { category: 'general', desc: 'Greeting' }, async (ctx) => {
   const name = ctx.pushName || 'friend';
-  return `👋 Salam *${name}*!\n\nMain *${BOT_NAME}* hoon. \`.menu\` likhein poori list ke liye.`;
+  return `\ud83d\udc4b Salam *${name}*!\n\nMain *${BOT_NAME}* hoon. \`.menu\` likhein poori list ke liye.`;
 });
 
 /* ------------------------------------------------------------- dispatcher */
@@ -267,17 +298,56 @@ function attachCommands(sock, opts = {}) {
   const { logger, sessionId } = opts;
   const log = logger || console;
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+  // Message ids the bot itself produced — used to break the self-chat loop.
+  const sentIds = new IdSet(500);
+  const seenIds = new IdSet(800);
+
+  // Every outbound message is recorded so the self-chat handler can ignore it.
+  const origSend = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...args) => {
+    const res = await origSend(...args);
+    try {
+      if (res?.key?.id) sentIds.add(res.key.id);
+    } catch {
+      /* ignore */
+    }
+    return res;
+  };
+
+  const handler = async ({ messages, type }) => {
+    // "notify" = fresh live message. "append" is history/offline sync, but a
+    // linked device also receives its own self-chat sends as "append", so we
+    // accept that one only for very recent self-chat messages.
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const raw of messages || []) {
       try {
         if (!raw?.message) continue;
-        if (raw.key?.fromMe) continue; // never answer ourselves
+        if (!raw.key?.id) continue;
+        if (seenIds.has(raw.key.id)) continue;
+        seenIds.add(raw.key.id);
 
         const chat = raw.key.remoteJid;
         if (!chat) continue;
         if (chat === 'status@broadcast') continue;
+
+        const botNumber = jidToNumber(sock.user?.id);
+        const chatNumber = jidToNumber(chat);
+        const isSelfChat = Boolean(botNumber) && chatNumber === botNumber;
+
+        // --- the fix that makes the bot actually answer -------------------
+        // Previously every `fromMe` message was dropped, which silently broke
+        // the "Message yourself" flow the landing page instructs users to use.
+        // We now process `fromMe` messages only in the self-chat and only when
+        // the bot did not send them itself.
+        if (raw.key.fromMe) {
+          if (!isSelfChat) continue;
+          if (sentIds.has(raw.key.id)) continue;
+        }
+
+        // Ignore ancient messages replayed by history sync.
+        const ts = Number(raw.messageTimestamp || 0) * 1000;
+        if (type === 'append' && ts && Date.now() - ts > 120_000) continue;
 
         const text = extractText(raw.message);
         if (!text) continue;
@@ -308,7 +378,9 @@ function attachCommands(sock, opts = {}) {
           ? {
               key: {
                 remoteJid: chat,
-                fromMe: ctxInfo.participant === jidToNumber(sock.user?.id) + '@s.whatsapp.net',
+                fromMe: ctxInfo.participant
+                  ? jidToNumber(ctxInfo.participant) === botNumber
+                  : false,
                 id: ctxInfo.stanzaId,
                 participant: ctxInfo.participant,
               },
@@ -329,6 +401,7 @@ function attachCommands(sock, opts = {}) {
           pushName: raw.pushName || '',
           botJid: sock.user?.id || '',
           sessionId,
+          logger: log,
           reply: (t) => sock.sendMessage(chat, { text: t }, { quoted: raw }),
         };
 
@@ -338,16 +411,16 @@ function attachCommands(sock, opts = {}) {
           await sock.sendMessage(chat, { text: out }, { quoted: raw });
         }
         log.info?.(
-          { sessionId, cmd: name, ms: Date.now() - started },
+          { sessionId, cmd: name, ms: Date.now() - started, self: isSelfChat },
           'command handled'
         );
-        opts.onEvent?.({ type: 'command', cmd: name, chat });
+        opts.onEvent?.({ type: 'command', cmd: name, chat, self: isSelfChat });
       } catch (err) {
-        log.warn?.({ err: err.message, cmd: 'unknown' }, 'command failed');
+        log.warn?.({ err: err.message }, 'command failed');
         try {
           await sock.sendMessage(
             raw.key.remoteJid,
-            { text: '❌ Command mein error aaya. Dobara try karein.' },
+            { text: '\u274c Command mein error aaya. Dobara try karein.' },
             { quoted: raw }
           );
         } catch {
@@ -355,15 +428,17 @@ function attachCommands(sock, opts = {}) {
         }
       }
     }
-  });
+  };
+
+  sock.ev.on('messages.upsert', handler);
 
   return () => {
     try {
-      sock.ev.removeAllListeners('messages.upsert');
+      sock.ev.removeListener('messages.upsert', handler);
     } catch {
       /* ignore */
     }
   };
 }
 
-module.exports = { attachCommands, commands, PREFIXES };
+module.exports = { attachCommands, commands, PREFIXES, jidToNumber };

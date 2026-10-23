@@ -19,6 +19,7 @@
  *    `me` so Baileys starts a clean pairing handshake.
  */
 const { EventEmitter } = require('events');
+const { randomUUID } = require('crypto');
 const { ObjectId } = require('mongodb');
 const pino = require('pino');
 
@@ -50,6 +51,36 @@ const STATUS = Object.freeze({
 });
 
 const logger = pino({ level: process.env.WA_LOG_LEVEL || 'warn' });
+
+/**
+ * A single Baileys socket may exist per linked number, worldwide. Railway does
+ * rolling deploys: for a few seconds the old container and the new one both
+ * run. If both open a socket for the same creds WhatsApp answers with
+ * 440 "Stream Errored (conflict)" and kills both — the linked number then goes
+ * silent until the watchdog fights it back, forever.
+ *
+ * A Mongo lease solves it: only the instance holding the lease for a session
+ * may open its socket. Leases are renewed by a heartbeat and released on
+ * graceful shutdown, so a crashed container is recovered within LEASE_MS.
+ */
+const LEASE_MS = 45_000;
+const HEARTBEAT_MS = 15_000;
+
+/** Small in-memory cache so getMessage() can answer retry/decrypt requests. */
+class MsgCache {
+  constructor(max = 300) {
+    this.max = max;
+    this.map = new Map();
+  }
+  set(id, msg) {
+    if (!id) return;
+    this.map.set(id, msg);
+    if (this.map.size > this.max) this.map.delete(this.map.keys().next().value);
+  }
+  get(id) {
+    return this.map.get(id);
+  }
+}
 
 /**
  * Turn anything a human might type into a bare international number.
@@ -104,6 +135,9 @@ class WaManager extends EventEmitter {
     this.runtimes = new Map();
     this.startedAt = Date.now();
     this._shuttingDown = false;
+    this.instanceId = randomUUID();
+    this.msgCache = new MsgCache(300);
+    this._heartbeat = null;
   }
 
   // ---------------------------------------------------------------- helpers
@@ -161,6 +195,77 @@ class WaManager extends EventEmitter {
 
   async countAll() {
     return this.col.countDocuments({});
+  }
+
+  // ------------------------------------------------------------ socket lease
+
+  /**
+   * Try to become the single owner of a session's socket.
+   * Returns true when this instance may open the socket.
+   */
+  async acquireLease(docId) {
+    const _id = typeof docId === 'string' ? new ObjectId(docId) : docId;
+    const now = new Date();
+    const staleBefore = new Date(Date.now() - LEASE_MS);
+    try {
+      const res = await this.col.findOneAndUpdate(
+        {
+          _id,
+          $or: [
+            { lockOwner: { $in: [null, this.instanceId] } },
+            { lockOwner: { $exists: false } },
+            { lockAt: { $lt: staleBefore } },
+          ],
+        },
+        { $set: { lockOwner: this.instanceId, lockAt: now } },
+        { returnDocument: 'after' }
+      );
+      // mongodb driver v6 returns the document directly; older versions wrap
+      // it in { value }. Support both so the lease can never silently fail.
+      const doc = res && (res.value !== undefined ? res.value : res);
+      return Boolean(doc && doc._id);
+    } catch (err) {
+      logger.warn({ err: err.message }, 'acquireLease failed');
+      return false;
+    }
+  }
+
+  async releaseLease(docId) {
+    const _id = typeof docId === 'string' ? new ObjectId(docId) : docId;
+    try {
+      await this.col.updateOne(
+        { _id, lockOwner: this.instanceId },
+        { $set: { lockOwner: null, lockAt: null } }
+      );
+    } catch {
+      /* best effort */
+    }
+  }
+
+  startHeartbeat() {
+    if (this._heartbeat) return this._heartbeat;
+    this._heartbeat = setInterval(async () => {
+      if (this._shuttingDown) return;
+      const ids = [...this.runtimes.values()].map((rt) => rt.docId);
+      if (!ids.length) return;
+      try {
+        await this.col.updateMany(
+          { _id: { $in: ids }, lockOwner: this.instanceId },
+          { $set: { lockAt: new Date() } }
+        );
+      } catch {
+        /* best effort */
+      }
+    }, HEARTBEAT_MS);
+    if (this._heartbeat.unref) this._heartbeat.unref();
+    return this._heartbeat;
+  }
+
+  stopHeartbeat() {
+    if (this._heartbeat) {
+      clearInterval(this._heartbeat);
+      this._heartbeat = null;
+    }
   }
 
   // -------------------------------------------------------------- lifecycle
@@ -235,6 +340,20 @@ class WaManager extends EventEmitter {
       throw e;
     }
 
+    // Already linked? Never tear down a healthy socket just because the user
+    // re-submitted the same number — that used to disconnect a working bot.
+    const live = this.runtimes.get(String(doc._id));
+    if (doc.status === STATUS.CONNECTED && (doc.me || (live && live.sock?.user))) {
+      return {
+        code: null,
+        sessionId: String(doc._id),
+        alreadyConnected: true,
+        status: STATUS.CONNECTED,
+        me: doc.me || null,
+        message: 'Ye number pehle se linked hai aur bot chal raha hai.',
+      };
+    }
+
     // Kill any existing socket for this session first.
     await this._killRuntime(String(doc._id));
 
@@ -292,6 +411,17 @@ class WaManager extends EventEmitter {
       await delay(400);
     }
 
+    // --- Cross-instance lease guard ---------------------------------------
+    // A rolling deploy briefly runs two containers. Without this only one of
+    // them may own the socket, otherwise WhatsApp kills both with 440.
+    const leased = await this.acquireLease(doc._id);
+    if (!leased) {
+      logger.warn({ sessionId }, 'startSocket: lease held by another instance, skipping');
+      await this.logEvent(doc._id, 'lease_busy', { instance: this.instanceId });
+      return null;
+    }
+    this.startHeartbeat();
+
     let state, saveCreds;
     try {
       ({ state, saveCreds } = await useMongoAuthState(sessionId));
@@ -300,14 +430,16 @@ class WaManager extends EventEmitter {
       // next boot resumes it instead of parking the session as `error`.
       if (this._shuttingDown) return null;
       await this.persist(doc._id, { status: STATUS.ERROR, lastError: 'auth state: ' + err.message });
+      await this.releaseLease(doc._id);
       return null;
     }
 
     // --- Poisoned-creds guard -------------------------------------------
     // `me` set + `registered:false` => the next LOGIN node is rejected with
-    // 401 "could not link device". Drop the half-written identity so Baileys
-    // performs a fresh pairing handshake.
-    if (!state.creds.registered && state.creds.me && !doc.pairingAt) {
+    // 401 "could not link device". `registered` only flips to true AFTER the
+    // phone accepts the code, so any `me` before that is half-written garbage
+    // and must be dropped, no matter how the session got here.
+    if (!state.creds.registered && state.creds.me) {
       delete state.creds.me;
       delete state.creds.pairingCode;
       try {
@@ -338,11 +470,18 @@ class WaManager extends EventEmitter {
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
         markOnlineOnConnect: false,
-        getMessage: async () => undefined,
+        // Retry receipts / decrypt retries ask for the original message again.
+        // Returning undefined here makes media and view-once downloads fail.
+        getMessage: async (key) => {
+          const cached = this.msgCache.get(key?.id);
+          if (cached) return cached;
+          return undefined;
+        },
       });
     } catch (err) {
       if (this._shuttingDown) return null;
       await this.persist(doc._id, { status: STATUS.ERROR, lastError: 'socket: ' + err.message });
+      await this.releaseLease(doc._id);
       return null;
     }
 
@@ -391,6 +530,13 @@ class WaManager extends EventEmitter {
       this.onConnectionUpdate(runtime, update).catch((err) =>
         logger.error({ err }, 'connection.update handler failed')
       );
+    });
+
+    // Cache recent messages so retry receipts and .vv can re-download media.
+    sock.ev.on('messages.upsert', ({ messages }) => {
+      for (const m of messages || []) {
+        if (m?.key?.id) this.msgCache.set(m.key.id, m.message);
+      }
     });
 
     // --- Command engine ---------------------------------------------------
@@ -464,6 +610,23 @@ class WaManager extends EventEmitter {
         return;
       }
 
+      // 440 — connectionReplaced / "Stream Errored (conflict)". Another
+      // container (or a stale socket) is using the same creds. Reconnecting
+      // instantly just repeats the fight, so back off and let the lease
+      // decide who wins.
+      if (statusCode === 440 || statusCode === DisconnectReason.connectionReplaced) {
+        await this.persist(runtime.docId, {
+          status: STATUS.CONNECTING,
+          lastError: 'Another instance is using this session (440).',
+          hasQr: false,
+        });
+        await this.logEvent(runtime.docId, 'conflict', { reason });
+        await this.releaseLease(runtime.docId);
+        await delay(20_000 + Math.floor(Math.random() * 10_000));
+        this.reconnect(runtime.docId).catch(() => {});
+        return;
+      }
+
       // 515 — restartRequired. This is the normal "phone accepted the code"
       // signal. Reconnect fast so the registration completes.
       if (statusCode === DisconnectReason.restartRequired) {
@@ -520,15 +683,23 @@ class WaManager extends EventEmitter {
     this._watchdog = setInterval(async () => {
       if (this._shuttingDown) return;
       try {
+        // Only reviving genuinely-live states. DISCONNECTED is what the user
+        // gets after pressing "Disconnect" — reviving it made the button
+        // useless and brought the bot back 30s later.
         const docs = await this.col
           .find({
             me: { $ne: null },
-            status: { $nin: [STATUS.LOGGED_OUT] },
+            status: { $in: [STATUS.CONNECTED, STATUS.CONNECTING, STATUS.ERROR] },
           })
           .toArray();
         for (const doc of docs) {
           const sid = String(doc._id);
           if (this.runtimes.has(sid)) continue;
+          // Another instance may own this session right now.
+          if (doc.lockOwner && doc.lockOwner !== this.instanceId) {
+            const lockAge = doc.lockAt ? Date.now() - new Date(doc.lockAt).getTime() : Infinity;
+            if (lockAge < LEASE_MS) continue;
+          }
           logger.warn({ sid, number: doc.number, status: doc.status }, 'watchdog: reviving linked session');
           await this.logEvent(doc._id, 'watchdog_revive', { status: doc.status });
           await this.startSocket({ ...doc, status: STATUS.CONNECTING });
@@ -582,7 +753,10 @@ class WaManager extends EventEmitter {
 
   async _killRuntime(sessionId) {
     const rt = this.runtimes.get(sessionId);
-    if (!rt) return;
+    if (!rt) {
+      await this.releaseLease(sessionId);
+      return;
+    }
     this.runtimes.delete(sessionId);
     try {
       rt.detachCommands?.();
@@ -593,6 +767,7 @@ class WaManager extends EventEmitter {
     } catch {
       /* already gone */
     }
+    await this.releaseLease(rt.docId || sessionId);
   }
 
   async disconnect(sessionId, ownerId) {
@@ -656,6 +831,8 @@ class WaManager extends EventEmitter {
 
   async shutdown() {
     this._shuttingDown = true;
+    this.stopWatchdog();
+    this.stopHeartbeat();
     for (const [sessionId, rt] of this.runtimes.entries()) {
       try {
         rt.sock.ev.removeAllListeners('connection.update');
@@ -664,6 +841,9 @@ class WaManager extends EventEmitter {
         /* ignore */
       }
       this.runtimes.delete(sessionId);
+      // Hand the lease back so the replacement container can connect at once
+      // instead of waiting for the 45s stale window.
+      await this.releaseLease(rt.docId || sessionId);
     }
   }
 }
