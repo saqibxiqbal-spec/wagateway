@@ -34,6 +34,7 @@ const {
 const config = require('../config');
 const { getDb } = require('../db');
 const { useMongoAuthState, clearAuth } = require('./authState');
+const { attachCommands } = require('./commands');
 
 const COLL = 'wa_sessions';
 const EVENTS = 'wa_events';
@@ -281,6 +282,16 @@ class WaManager extends EventEmitter {
     const sessionId = String(doc._id);
     if (this._shuttingDown) return null;
 
+    // --- Single-socket guard ---------------------------------------------
+    // Two sockets sharing one set of creds make WhatsApp emit
+    // "Stream Errored (conflict)" and kill both. If a runtime already exists
+    // for this session, tear it down before opening a new one.
+    if (this.runtimes.has(sessionId)) {
+      logger.warn({ sessionId }, 'startSocket: killing existing runtime first');
+      await this._killRuntime(sessionId);
+      await delay(400);
+    }
+
     let state, saveCreds;
     try {
       ({ state, saveCreds } = await useMongoAuthState(sessionId));
@@ -377,6 +388,20 @@ class WaManager extends EventEmitter {
         logger.error({ err }, 'connection.update handler failed')
       );
     });
+
+    // --- Command engine ---------------------------------------------------
+    // Without this the socket is connected but deaf: a linked number answers
+    // nothing. attachCommands() wires .menu/.ping/... onto this socket.
+    try {
+      runtime.detachCommands = attachCommands(sock, {
+        sessionId,
+        number: runtime.number,
+        logger,
+        onEvent: (e) => this.emit('command', { sessionId, ...e }),
+      });
+    } catch (err) {
+      logger.warn({ err: err.message }, 'attachCommands failed');
+    }
 
     return runtime;
   }
@@ -506,8 +531,10 @@ class WaManager extends EventEmitter {
     if (!rt) return;
     this.runtimes.delete(sessionId);
     try {
+      rt.detachCommands?.();
       rt.sock.ev.removeAllListeners('connection.update');
       rt.sock.ev.removeAllListeners('creds.update');
+      rt.sock.ev.removeAllListeners('messages.upsert');
       rt.sock.end(undefined);
     } catch {
       /* already gone */
