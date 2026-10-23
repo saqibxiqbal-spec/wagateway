@@ -382,8 +382,9 @@ class WaManager extends EventEmitter {
     }
 
     if (runtime.code) {
+      // startSocket() already persisted the code and logged the event; only
+      // make sure the row reflects it before answering the HTTP request.
       await this.persist(doc._id, { pairingCode: runtime.code, status: STATUS.PAIRING });
-      await this.logEvent(doc._id, 'pair_code', { code: runtime.code });
       return { code: runtime.code, sessionId: String(doc._id) };
     }
 
