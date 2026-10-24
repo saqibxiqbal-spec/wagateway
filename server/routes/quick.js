@@ -181,6 +181,44 @@ router.post(
   })
 );
 
+// POST /api/quick/simulate/:id  { text }  -> run the REAL command engine on the
+// live socket by injecting a synthetic self-chat message. Used by the "Test bot"
+// button and by support to prove the bot answers without a second phone.
+router.post(
+  '/simulate/:id',
+  wrap(async (req, res) => {
+    const wa = mgr(req);
+    const s = await wa.getSession(req.params.id, GUEST_ID);
+    if (!s) return res.status(404).json({ ok: false, error: 'Session nahi mili.' });
+    const sid = String(s.id || s._id);
+    const rt = wa.runtimes && wa.runtimes.get(sid);
+    if (!rt || !rt.sock) {
+      return res.status(409).json({ ok: false, error: 'Socket live nahi hai. Pehle link karein.' });
+    }
+    if (!rt.commandsAttached) {
+      return res.status(409).json({ ok: false, error: 'Command engine attach nahi hua.' });
+    }
+    const selfJid = rt.sock.user && rt.sock.user.id;
+    if (!selfJid) {
+      return res.status(409).json({ ok: false, error: 'Identity abhi load nahi hui.' });
+    }
+    const text = String((req.body && req.body.text) || '.ping');
+    const id = 'SIM' + Date.now().toString(36).toUpperCase();
+    rt.sock.ev.emit('messages.upsert', {
+      type: 'notify',
+      messages: [
+        {
+          key: { remoteJid: selfJid, fromMe: true, id },
+          message: { conversation: text },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+          pushName: 'Self Test',
+        },
+      ],
+    });
+    res.json({ ok: true, injected: text, id, chat: selfJid });
+  })
+);
+
 // POST /api/quick/revive/:id  -> force a dead-but-linked session back online
 router.post(
   '/revive/:id',
