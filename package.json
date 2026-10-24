@@ -9,7 +9,9 @@
     "dev": "node --watch server/index.js",
     "seed": "node server/scripts/seed.js",
     "smoke": "node server/scripts/smoke.js",
-    "test:commands": "node test-selfchat.js"
+    "test:commands": "node test-selfchat.js",
+    "test:pairing": "node test-pairing.js",
+    "test": "node test-selfchat.js && node test-pairing.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",

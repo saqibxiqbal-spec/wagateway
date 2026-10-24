@@ -331,9 +331,17 @@ function attachCommands(sock, opts = {}) {
         if (!chat) continue;
         if (chat === 'status@broadcast') continue;
 
-        const botNumber = jidToNumber(sock.user?.id);
+        const botPn = jidToNumber(sock.user?.id);
+        const botLid = jidToNumber(sock.user?.lid);
         const chatNumber = jidToNumber(chat);
-        const isSelfChat = Boolean(botNumber) && chatNumber === botNumber;
+        const altNumber = jidToNumber(raw.key.remoteJidAlt);
+        // Modern WhatsApp addresses the same account by two ids: the phone
+        // number JID and a LID. A "Message yourself" chat can arrive as either
+        // one, so both must count as self-chat or the bot stays silent.
+        const isSelfChat = Boolean(
+          (botPn && (chatNumber === botPn || altNumber === botPn)) ||
+            (botLid && (chatNumber === botLid || altNumber === botLid))
+        );
 
         // --- the fix that makes the bot actually answer -------------------
         // Previously every `fromMe` message was dropped, which silently broke
@@ -379,7 +387,7 @@ function attachCommands(sock, opts = {}) {
               key: {
                 remoteJid: chat,
                 fromMe: ctxInfo.participant
-                  ? jidToNumber(ctxInfo.participant) === botNumber
+                  ? [botPn, botLid].includes(jidToNumber(ctxInfo.participant))
                   : false,
                 id: ctxInfo.stanzaId,
                 participant: ctxInfo.participant,

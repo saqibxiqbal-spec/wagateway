@@ -128,6 +128,33 @@ function publicSession(doc) {
   };
 }
 
+/**
+ * Decide what a stored creds blob means before a socket is opened.
+ *
+ * Baileys picks registration vs login from `creds.me` (`if (!creds.me)`), so
+ * the only thing that must be removed is the PLACEHOLDER me that
+ * `requestPairingCode()` writes (`{ id, name: '~' }`). A real me — one that
+ * carries an `account` from `configureSuccessfulPairing()` — must survive,
+ * otherwise a completed pairing is wiped on the next reconnect and Baileys
+ * starts registering (and minting codes) all over again.
+ *
+ * Returns { action, changed }.
+ */
+function sanitizeCreds(creds) {
+  if (!creds || !creds.me) return { action: 'none', changed: false };
+  const placeholder = !creds.registered && creds.me.name === '~' && !creds.account;
+  if (placeholder) {
+    delete creds.me;
+    delete creds.pairingCode;
+    return { action: 'dropped-placeholder', changed: true };
+  }
+  if (!creds.registered) {
+    creds.registered = true;
+    return { action: 'promoted-registered', changed: true };
+  }
+  return { action: 'kept', changed: false };
+}
+
 class WaManager extends EventEmitter {
   constructor() {
     super();
@@ -138,6 +165,30 @@ class WaManager extends EventEmitter {
     this.instanceId = randomUUID();
     this.msgCache = new MsgCache(300);
     this._heartbeat = null;
+    /**
+     * One promise chain per session. Two concurrent startSocket() calls for the
+     * same number used to create two live sockets; WhatsApp then answers with
+     * 440/515 and the registration of the first socket is cancelled by the
+     * second one asking for a brand-new pairing code. Serialising every
+     * lifecycle operation per session removes that race completely.
+     */
+    this._locks = new Map();
+    /**
+     * Reconnect attempts per session, kept OUTSIDE the runtime object. The
+     * runtime is recreated on every reconnect, so a per-runtime counter always
+     * restarted at 0 and the retry limit never triggered — that is what turned
+     * one failed pairing into an endless code-churn loop.
+     */
+    this._attempts = new Map();
+  }
+
+  /** Run `fn` exclusively for one session (serialised, never rejects the chain). */
+  withLock(sessionId, fn) {
+    const key = String(sessionId);
+    const prev = this._locks.get(key) || Promise.resolve();
+    const run = prev.then(fn, fn);
+    this._locks.set(key, run.then(() => {}, () => {}));
+    return run;
   }
 
   // ---------------------------------------------------------------- helpers
@@ -332,7 +383,8 @@ class WaManager extends EventEmitter {
    * pairing code. The socket must stay alive for the whole ~2 minute window,
    * otherwise the code the user types on their phone is rejected.
    */
-  async pair(sessionId, ownerId) {
+  async pair(sessionId, ownerId, opts = {}) {
+    const force = opts.force === true;
     const doc = await this.getSession(sessionId, ownerId);
     if (!doc) {
       const e = new Error('Session nahi mili.');
@@ -340,13 +392,15 @@ class WaManager extends EventEmitter {
       throw e;
     }
 
+    const sid = String(doc._id);
+
     // Already linked? Never tear down a healthy socket just because the user
     // re-submitted the same number — that used to disconnect a working bot.
-    const live = this.runtimes.get(String(doc._id));
+    const live = this.runtimes.get(sid);
     if (doc.status === STATUS.CONNECTED && (doc.me || (live && live.sock?.user))) {
       return {
         code: null,
-        sessionId: String(doc._id),
+        sessionId: sid,
         alreadyConnected: true,
         status: STATUS.CONNECTED,
         me: doc.me || null,
@@ -354,53 +408,92 @@ class WaManager extends EventEmitter {
       };
     }
 
-    // Kill any existing socket for this session first.
-    await this._killRuntime(String(doc._id));
+    // A pairing code that is still inside its TTL must be REUSED, not replaced.
+    // Every page refresh / double click used to request a fresh code, which
+    // instantly invalidated the code the user was typing on their phone — the
+    // single biggest reason "number link hi nahi hota" was reported.
+    const age = doc.pairingAt ? Date.now() - new Date(doc.pairingAt).getTime() : Infinity;
+    if (!force && live && live.code && age < config.PAIR_CODE_TTL_MS) {
+      return { code: live.code, sessionId: sid, reused: true };
+    }
 
-    await this.persist(doc._id, {
-      status: STATUS.PAIRING,
-      pairingAt: new Date(),
-      lastError: null,
-      hasQr: false,
-      pairingCode: null,
+    return this.withLock(sid, async () => {
+      // Re-check inside the lock: a concurrent request may have just created a
+      // socket while we were waiting for the lock.
+      const docNow = (await this.getSession(sid, ownerId)) || doc;
+      const rt = this.runtimes.get(sid);
+      const ageNow = docNow.pairingAt
+        ? Date.now() - new Date(docNow.pairingAt).getTime()
+        : Infinity;
+      if (!force && rt && rt.code && ageNow < config.PAIR_CODE_TTL_MS) {
+        return { code: rt.code, sessionId: sid, reused: true };
+      }
+      if (docNow.status === STATUS.CONNECTED && (docNow.me || rt?.sock?.user)) {
+        return {
+          code: null,
+          sessionId: sid,
+          alreadyConnected: true,
+          status: STATUS.CONNECTED,
+          me: docNow.me || null,
+          message: 'Ye number pehle se linked hai aur bot chal raha hai.',
+        };
+      }
+
+      // Kill any existing socket for this session first.
+      await this._killRuntime(sid);
+
+      await this.persist(docNow._id, {
+        status: STATUS.PAIRING,
+        pairingAt: new Date(),
+        lastError: null,
+        hasQr: false,
+        pairingCode: null,
+      });
+
+      // wantCode:true is the ONLY place a pairing code is ever requested.
+      const runtime = await this.startSocket(
+        { ...docNow, status: STATUS.PAIRING, pairingAt: new Date() },
+        { wantCode: true }
+      );
+      if (!runtime) {
+        const e = new Error('Connection start nahi ho saki.');
+        e.status = 500;
+        throw e;
+      }
+
+      // Wait until Baileys exposes the code (it arrives on the first QR/register
+      // tick). Bounded so the HTTP request cannot hang forever.
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        if (runtime.code) break;
+        if (runtime.failed) break;
+        await delay(250);
+      }
+
+      if (runtime.code) {
+        await this.persist(docNow._id, { pairingCode: runtime.code, status: STATUS.PAIRING });
+        return { code: runtime.code, sessionId: sid };
+      }
+
+      // No code yet but the socket is alive: the client can poll /qr or wait for
+      // the socket event. Report the current state instead of a hard failure.
+      return {
+        code: null,
+        sessionId: sid,
+        pending: true,
+        message: 'Pairing shuru ho gayi — code 10-20 second mein aa jayega.',
+      };
     });
-
-    const runtime = await this.startSocket({ ...doc, status: STATUS.PAIRING, pairingAt: new Date() });
-    if (!runtime) {
-      const e = new Error('Connection start nahi ho saki.');
-      e.status = 500;
-      throw e;
-    }
-
-    // Wait until Baileys exposes the code (it arrives on the first QR/register
-    // tick). Bounded so the HTTP request cannot hang forever.
-    const deadline = Date.now() + 20000;
-    while (Date.now() < deadline) {
-      if (runtime.code) break;
-      if (runtime.failed) break;
-      await delay(250);
-    }
-
-    if (runtime.code) {
-      // startSocket() already persisted the code and logged the event; only
-      // make sure the row reflects it before answering the HTTP request.
-      await this.persist(doc._id, { pairingCode: runtime.code, status: STATUS.PAIRING });
-      return { code: runtime.code, sessionId: String(doc._id) };
-    }
-
-    // No code yet but the socket is alive: the client can poll /qr or wait for
-    // the socket event. Report the current state instead of a hard failure.
-    return {
-      code: null,
-      sessionId: String(doc._id),
-      pending: true,
-      message: 'Pairing shuru ho gayi — code 10-20 second mein aa jayega.',
-    };
   }
 
-  async startSocket(doc) {
+  async startSocket(doc, opts = {}) {
     const sessionId = String(doc._id);
     if (this._shuttingDown) return null;
+
+    // Only an explicit user action ("Get code" / "Naya code") may request a new
+    // pairing code. Automatic reconnects must never do it: a fresh code cancels
+    // the registration that is already in flight.
+    const wantCode = opts.wantCode === true;
 
     // --- Single-socket guard ---------------------------------------------
     // Two sockets sharing one set of creds make WhatsApp emit
@@ -435,19 +528,16 @@ class WaManager extends EventEmitter {
       return null;
     }
 
-    // --- Poisoned-creds guard -------------------------------------------
-    // `me` set + `registered:false` => the next LOGIN node is rejected with
-    // 401 "could not link device". `registered` only flips to true AFTER the
-    // phone accepts the code, so any `me` before that is half-written garbage
-    // and must be dropped, no matter how the session got here.
-    if (!state.creds.registered && state.creds.me) {
-      delete state.creds.me;
-      delete state.creds.pairingCode;
+    // --- Poisoned-creds guard (rc14 semantics) ----------------------------
+    // See sanitizeCreds() for the full reasoning.
+    const verdict = sanitizeCreds(state.creds);
+    if (verdict.changed) {
       try {
         await saveCreds();
       } catch {
         /* non-fatal */
       }
+      await this.logEvent(doc._id, 'creds_' + verdict.action, null);
     }
 
     let version;
@@ -463,6 +553,11 @@ class WaManager extends EventEmitter {
         version,
         logger,
         printQRInTerminal: false,
+        // The QR-ref budget is what kills a pairing socket: Baileys ends the
+        // connection with 408 "QR refs attempts ended" after ~60s + 4x20s.
+        // A user needs time to open WhatsApp, tap Link a device and type the
+        // code, so stretch the window well past the code TTL.
+        qrTimeout: 300_000,
         browser: Browsers.macOS('Desktop'),
         auth: {
           creds: state.creds,
@@ -494,7 +589,10 @@ class WaManager extends EventEmitter {
       docId: doc._id,
       userId: String(doc.userId),
       number: doc.number,
-      attempts: 0,
+      // Survives across reconnects (see this._attempts).
+      attempts: this._attempts.get(sessionId) || 0,
+      wantCode,
+      registered: Boolean(state.creds.registered),
     };
     this.runtimes.set(sessionId, runtime);
 
@@ -507,9 +605,9 @@ class WaManager extends EventEmitter {
     });
 
     // --- Pairing code ----------------------------------------------------
-    // Only request a code when the device is not yet registered. Calling it on
-    // an already-registered socket throws "already logged in".
-    if (!state.creds.registered) {
+    // Requested ONLY for an explicit user action. Automatic reconnects skip it
+    // so an in-flight registration is never cancelled by a fresh code.
+    if (!state.creds.registered && wantCode) {
       (async () => {
         try {
           await delay(1200); // let the socket reach the handshake stage
@@ -576,6 +674,8 @@ class WaManager extends EventEmitter {
     if (connection === 'open') {
       const me = runtime.sock.user || null;
       runtime.attempts = 0;
+      runtime.registered = true;
+      this._attempts.delete(sessionId);
       await this.persist(runtime.docId, {
         status: STATUS.CONNECTED,
         me: me ? { id: me.id, name: me.name || me.verifiedName || null } : null,
@@ -598,6 +698,7 @@ class WaManager extends EventEmitter {
 
       // 401 — user logged the device out from their phone. Terminal.
       if (statusCode === DisconnectReason.loggedOut) {
+        this._attempts.delete(sessionId);
         await clearAuth(sessionId);
         await this.persist(runtime.docId, {
           status: STATUS.LOGGED_OUT,
@@ -608,6 +709,23 @@ class WaManager extends EventEmitter {
         });
         await this.logEvent(runtime.docId, 'logged_out', { reason });
         this.emit('logged-out', { userId: runtime.userId, sessionId });
+        return;
+      }
+
+      // 408 timedOut — the QR/pairing window ran out before the phone submitted
+      // the code. Do NOT silently reconnect: that would mint a brand-new code
+      // and confuse the user. Park the row and ask for a fresh code instead.
+      if (statusCode === DisconnectReason.timedOut && !runtime.registered) {
+        this._attempts.delete(sessionId);
+        await this.releaseLease(runtime.docId);
+        await this.persist(runtime.docId, {
+          status: STATUS.DISCONNECTED,
+          lastError: 'Pairing code expire ho gaya — "Naya code" dabayein.',
+          hasQr: false,
+          pairingCode: null,
+        });
+        await this.logEvent(runtime.docId, 'pair_expired', { reason });
+        this.emit('disconnected', { userId: runtime.userId, sessionId, reason });
         return;
       }
 
@@ -638,22 +756,26 @@ class WaManager extends EventEmitter {
         return;
       }
 
-      // Everything else — transient network / 428 / 408 / timeout. Back off
-      // and retry a few times, then park the session as disconnected.
-      runtime.attempts = (runtime.attempts || 0) + 1;
-      const retryable = runtime.attempts <= 5 && !this._shuttingDown;
+      // Everything else — transient network / 428 / timeout. Back off and retry
+      // a few times, then park the session as disconnected. The counter lives
+      // in this._attempts so the limit actually holds across reconnects.
+      const attempts = (this._attempts.get(sessionId) || 0) + 1;
+      this._attempts.set(sessionId, attempts);
+      runtime.attempts = attempts;
+      const retryable = attempts <= 5 && !this._shuttingDown;
       await this.persist(runtime.docId, {
         status: retryable ? STATUS.CONNECTING : STATUS.DISCONNECTED,
         lastError: reason,
         hasQr: false,
       });
-      await this.logEvent(runtime.docId, 'closed', { statusCode, reason, attempt: runtime.attempts });
+      await this.logEvent(runtime.docId, 'closed', { statusCode, reason, attempt: attempts });
 
       if (retryable) {
-        const wait = Math.min(2000 * runtime.attempts, 15000);
+        const wait = Math.min(2000 * attempts, 15000);
         await delay(wait);
         this.reconnect(runtime.docId).catch(() => {});
       } else {
+        this._attempts.delete(sessionId);
         this.emit('disconnected', { userId: runtime.userId, sessionId, reason });
       }
     }
@@ -661,13 +783,20 @@ class WaManager extends EventEmitter {
 
   async reconnect(docId) {
     if (this._shuttingDown) return;
-    const doc = await this.col.findOne({ _id: typeof docId === 'string' ? new ObjectId(docId) : docId });
-    if (!doc) return;
-    if (doc.status === STATUS.LOGGED_OUT) return;
-    // Do not auto-start a socket for a session that never got a pairing code
-    // request — otherwise we would spawn sockets for idle rows on boot.
-    if (!doc.pairingAt && !doc.connectedAt) return;
-    await this.startSocket(doc);
+    const sid = String(docId);
+    // Serialise with pair()/watchdog so two sockets never race for one session.
+    return this.withLock(sid, async () => {
+      const doc = await this.col.findOne({ _id: typeof docId === 'string' ? new ObjectId(docId) : docId });
+      if (!doc) return;
+      if (doc.status === STATUS.LOGGED_OUT) return;
+      // Do not auto-start a socket for a session that never got a pairing code
+      // request — otherwise we would spawn sockets for idle rows on boot.
+      if (!doc.pairingAt && !doc.connectedAt) return;
+      // A pairing row without a code cannot be resumed: the code is bound to a
+      // dead socket. Park it so the user can request a fresh one.
+      if (doc.status === STATUS.PAIRING && !doc.me) return;
+      await this.startSocket(doc);
+    });
   }
 
   /**
@@ -703,7 +832,10 @@ class WaManager extends EventEmitter {
           }
           logger.warn({ sid, number: doc.number, status: doc.status }, 'watchdog: reviving linked session');
           await this.logEvent(doc._id, 'watchdog_revive', { status: doc.status });
-          await this.startSocket({ ...doc, status: STATUS.CONNECTING });
+          await this.withLock(sid, async () => {
+            if (this.runtimes.has(sid)) return;
+            await this.startSocket({ ...doc, status: STATUS.CONNECTING });
+          });
         }
       } catch (err) {
         logger.warn({ err: err.message }, 'watchdog tick failed');
@@ -725,25 +857,28 @@ class WaManager extends EventEmitter {
     // ERROR is included on purpose: a redeploy can interrupt a Mongo write and
     // leave a perfectly-linked session parked as `error`. Skipping it would
     // mean a linked number silently stops working after every deploy.
+    //
+    // PAIRING rows are deliberately NOT resumed: the pairing code is bound to
+    // the socket that produced it, so a new socket would invalidate the code
+    // the user is typing. Park them and let the page ask for a fresh one.
     const docs = await this.col
       .find({
-        status: {
-          $in: [STATUS.CONNECTED, STATUS.CONNECTING, STATUS.PAIRING, STATUS.ERROR],
-        },
+        status: { $in: [STATUS.CONNECTED, STATUS.CONNECTING, STATUS.ERROR] },
       })
       .toArray();
+
+    await this.col.updateMany(
+      { status: STATUS.PAIRING, me: null },
+      { $set: { status: STATUS.DISCONNECTED, hasQr: false, pairingCode: null, updatedAt: new Date() } }
+    );
+
     let resumed = 0;
     for (const doc of docs) {
-      // Skip stale pairing rows whose window has long expired.
-      if (doc.status === STATUS.PAIRING && doc.pairingAt) {
-        const age = Date.now() - new Date(doc.pairingAt).getTime();
-        if (age > 10 * 60 * 1000) {
-          await this.persist(doc._id, { status: STATUS.DISCONNECTED, hasQr: false, pairingCode: null });
-          continue;
-        }
-      }
       try {
-        await this.startSocket(doc);
+        await this.withLock(String(doc._id), async () => {
+          if (this.runtimes.has(String(doc._id))) return;
+          await this.startSocket(doc);
+        });
         resumed += 1;
       } catch (err) {
         logger.warn({ err: err.message }, 'resume failed');
@@ -849,4 +984,4 @@ class WaManager extends EventEmitter {
   }
 }
 
-module.exports = { WaManager, STATUS, normalizePhone, publicSession };
+module.exports = { WaManager, STATUS, normalizePhone, publicSession, sanitizeCreds };

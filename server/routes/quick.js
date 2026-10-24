@@ -128,7 +128,7 @@ router.post(
     const wa = mgr(req);
     const s = await wa.getSession(req.params.id, GUEST_ID);
     if (!s) return res.status(404).json({ ok: false, error: 'Session nahi mili.' });
-    const result = await wa.pair(String(s.id || s._id), GUEST_ID);
+    const result = await wa.pair(String(s.id || s._id), GUEST_ID, { force: true });
     res.json({ ok: true, sessionId: String(s.id || s._id), code: result.code || null, pending: !!result.pending });
   })
 );

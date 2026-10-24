@@ -195,7 +195,7 @@
           stopPoll();
           $('#okTxt').textContent = (s.pushName ? s.pushName + ' ' : '') + '— WhatsApp connect ho gaya hai.';
           show(v3);
-        } else if (s.status === 'logged_out' || s.status === 'error') {
+        } else if (s.status === 'logged_out' || s.status === 'error' || s.status === 'disconnected') {
           stopPoll();
           $('#statusTxt').textContent = s.lastError || 'Link fail — "Naya code" try karein';
           $('#status').querySelector('.spin').style.display = 'none';

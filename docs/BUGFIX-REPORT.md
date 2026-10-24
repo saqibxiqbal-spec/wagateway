@@ -171,3 +171,80 @@ PASS  stale history message ignored
   Deploy abhi manual trigger se hota hai. Push par automatic deploy ke liye Railway GitHub App
   ko repo par install karna hoga (permission Railway dashboard se).
 - Purani `logged_out` sessions DB mein padi hain — chahein to cleanup kar sakte hain.
+
+---
+
+# Round 2 — pairing loop root cause (5-day outage)
+
+## Symptom
+Number never links. If it ever links, the bot answers nothing.
+`wa_events` showed an endless loop every ~2 minutes:
+
+```
+closed {statusCode: 408, reason: 'QR refs attempts ended'}
+pair_code {code: 'NEW...'}
+```
+
+and Railway logs showed:
+
+```
+connected to WA
+not logged in, attempting registration...
+pairing configured successfully, expect to restart the connection...
+stream errored out
+connected to WA
+not logged in, attempting registration...   <-- registration lost
+```
+
+## Root causes
+
+1. **`creds.me` was deleted after a successful pairing.**
+   Baileys rc14 chooses login vs registration with `if (!creds.me)`
+   (`lib/Socket/socket.js:320`). `configureSuccessfulPairing()` returns
+   `{account, me, signalIdentities, platform}` and **never sets
+   `registered: true`**. The old guard in `startSocket()` deleted `me`
+   whenever `registered === false`, so the real device identity was wiped on
+   the reconnect the server itself requests right after pairing. Baileys then
+   registered again and minted a new code, cancelling the pairing that had
+   just succeeded.
+
+2. **Every reconnect requested a fresh pairing code.**
+   `if (!state.creds.registered) sock.requestPairingCode(...)` ran on every
+   socket, including automatic reconnects. A new code invalidates the one the
+   user is typing.
+
+3. **Two sockets could exist for one session.**
+   `startSocket()` had a check-then-act race: two concurrent calls both passed
+   `if (this.runtimes.has(sessionId))` before either registered its runtime.
+   Duplicate `pair_code` events at the same second prove it. Two sockets with
+   one creds blob fight, WhatsApp answers 440/515, and one of them re-registers.
+
+4. **The retry counter reset on every reconnect.**
+   `runtime.attempts` lived on the runtime object, which is recreated each
+   reconnect, so `attempts <= 5` was always true — the loop never stopped.
+
+5. **The pairing window was too short.** Default `qrTimeout` is 60s + 4×20s.
+
+## Fixes
+
+- `sanitizeCreds()` (exported, unit-tested): drops only the `{name:'~'}`
+  placeholder written by `requestPairingCode()`; promotes a real `me` to
+  `registered: true` instead of deleting it.
+- `wantCode` option: a code is requested **only** from `pair()` on an explicit
+  user action. `reconnect()`, `resumeAll()` and the watchdog never request one.
+- `withLock(sessionId, fn)`: every lifecycle operation for a session is
+  serialised, so one session can never own two sockets.
+- `pair()` reuses a still-valid code instead of minting a new one on page
+  refresh / double click; `{force:true}` (the "Naya code" button) opts out.
+- `_attempts` map keyed by session id: the retry limit now actually holds.
+- `qrTimeout: 300_000` so the user has time to type the code.
+- 408 `timedOut` while unpaired now parks the session as `disconnected` with a
+  clear message instead of silently reconnecting.
+- `resumeAll()` parks `pairing` rows instead of resuming them (their code is
+  bound to a dead socket).
+- Self-chat detection now matches both the phone-number JID and the LID, so
+  "Message yourself" commands work on modern WhatsApp addressing.
+- Frontend shows the "Naya code" prompt on `disconnected` too.
+
+## Tests
+`npm test` → 11/11 command-engine checks + 10/10 pairing checks.
