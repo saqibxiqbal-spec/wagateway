@@ -8,7 +8,22 @@ const {
   totalCommands,
   totalNames,
 } = require('../registry');
+const fs = require('fs');
+const path = require('path');
 const { humanUptime, jidToNumber } = require('./_util');
+const aiAgent = require('../aiAgent');
+
+/** Bot avatar, loaded once and reused for every menu send. */
+let BOT_IMAGE = null;
+function botImage() {
+  if (BOT_IMAGE !== null) return BOT_IMAGE;
+  try {
+    BOT_IMAGE = fs.readFileSync(path.join(__dirname, '..', '..', '..', 'web', 'assets', 'bot.jpg'));
+  } catch {
+    BOT_IMAGE = false;
+  }
+  return BOT_IMAGE || null;
+}
 
 const LINE = '\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501';
 
@@ -20,7 +35,22 @@ function header(subtitle) {
   );
 }
 
+const menuCache = new Map();
+const MENU_TTL = 60_000;
+
+function cached(key, fn) {
+  const hit = menuCache.get(key);
+  if (hit && Date.now() - hit.at < MENU_TTL) return hit.value;
+  const value = fn();
+  menuCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
 function overview() {
+  return cached('__overview', buildOverview);
+}
+
+function buildOverview() {
   const cats = categoryList();
   let out = header('\ud83d\udcca Command Menu');
   out += `\n\n\u23f1\ufe0f Uptime: *${humanUptime()}*\n`;
@@ -37,6 +67,10 @@ function overview() {
 }
 
 function categoryMenu(key) {
+  return cached('cat:' + key, () => buildCategoryMenu(key));
+}
+
+function buildCategoryMenu(key) {
   const cat = categoryList().find((c) => c.key === key);
   if (!cat) return null;
   const list = byCategory(key).sort((a, b) => a.name.localeCompare(b.name));
@@ -87,10 +121,11 @@ module.exports = (def) => {
       }
       if (arg) {
         const m = categoryMenu(arg);
-        if (m) return m;
+        if (m) return { image: botImage(), caption: m };
         return `\u274c Category \`${arg}\` nahi mili. \`.menu\` likhein list ke liye.`;
       }
-      return overview();
+      // Menu goes out as ONE message: bot picture + caption. Never two.
+      return { image: botImage(), caption: overview() };
     },
   });
 
@@ -178,5 +213,43 @@ module.exports = (def) => {
     desc: 'Kitni commands hain',
     run: async () =>
       `\ud83d\udd22 *Commands*\n\n\u2705 Unique: *${totalCommands()}*\n\ud83d\udd01 With aliases: *${totalNames()}*`,
+  });
+
+  /* ---------------------------------------------------- AI agent toggle */
+  def({
+    name: ['saqib', 'agent', 'autoreply', 'aiagent'],
+    category: 'main',
+    desc: 'AI agent on/off — bot khud jawab dega',
+    usage: '.saqib on | .saqib off | .saqib status',
+    run: async (ctx) => {
+      const arg = (ctx.args[0] || '').toLowerCase();
+      const sid = ctx.sessionId;
+
+      if (arg === 'on' || arg === 'start' || arg === 'enable') {
+        await aiAgent.setEnabled(sid, true);
+        return (
+          '\u{1F916} *AI Agent ON*\n\n' +
+          'Ab jo bhi aapko message karega, bot khud AI se jawab dega \u2014 ' +
+          'bilkul ek real assistant ki tarah.\n\n' +
+          '_Band karne ke liye:_ `.saqib off`'
+        );
+      }
+      if (arg === 'off' || arg === 'stop' || arg === 'disable') {
+        await aiAgent.setEnabled(sid, false);
+        return '\u{1F515} *AI Agent OFF*\n\nAb bot sirf commands ka jawab dega.';
+      }
+      if (arg === 'clear' || arg === 'reset') {
+        aiAgent.clearHistory(sid, ctx.chat);
+        return '\u{1F9F9} Is chat ki AI memory clear kar di.';
+      }
+
+      const on = await aiAgent.isEnabled(sid);
+      return (
+        `\u{1F916} *AI Agent:* ${on ? '\u2705 ON' : '\u274C OFF'}\n\n` +
+        '`.saqib on` \u2014 auto AI reply chalu\n' +
+        '`.saqib off` \u2014 band\n' +
+        '`.saqib clear` \u2014 memory clear'
+      );
+    },
   });
 };

@@ -10,6 +10,7 @@
 const express = require('express');
 const QRCode = require('qrcode');
 const { normalizePhone } = require('../wa/manager');
+const config = require('../config');
 
 const router = express.Router();
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -142,8 +143,10 @@ router.get(
     if (!s) return res.status(404).json({ ok: false, error: 'Session nahi mili.' });
     const sid = String(s.id || s._id);
     const { commands } = require('../wa/commands');
+    const aiAgent = require('../wa/aiAgent');
     const rt = wa.runtimes && wa.runtimes.get(sid);
     const commandsAttached = !!(rt && rt.commandsAttached);
+    const aiOn = await aiAgent.isEnabled(sid).catch(() => false);
     const doc = await wa.col.findOne({ _id: s._id || s.id });
     res.json({
       ok: true,
@@ -155,6 +158,10 @@ router.get(
       commandHandlerAttached: commandsAttached,
       commandsLoaded: commands.size,
       selfChatReady: commandsAttached,
+      aiAgentAttached: !!(rt && rt.agentAttached),
+      aiAgentOn: aiOn,
+      alwaysOnline: config.ALWAYS_ONLINE,
+      autoRead: config.AUTO_READ,
       leaseOwner: doc ? doc.lockOwner || null : null,
       thisInstance: wa.instanceId || null,
       me: s.me || null,

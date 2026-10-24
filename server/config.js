@@ -28,6 +28,20 @@ const config = {
   DEFAULT_COUNTRY_CODE: process.env.DEFAULT_COUNTRY_CODE || '92',
   PAIR_CODE_TTL_MS: num(process.env.PAIR_CODE_TTL_MS, 110000),
 
+  // Owner (only used for labels / optional restrictions, never to block)
+  OWNER_NUMBER: (process.env.OWNER_NUMBER || '923106762478').replace(/[^0-9]/g, ''),
+
+  // Presence: appear online, deliver messages (double tick) but never read
+  // (no blue tick) and never auto-mark as read.
+  ALWAYS_ONLINE: String(process.env.ALWAYS_ONLINE || 'true') === 'true',
+  AUTO_READ: String(process.env.AUTO_READ || 'false') === 'true',
+  PRESENCE_INTERVAL_MS: num(process.env.PRESENCE_INTERVAL_MS, 25_000),
+
+  // AI agent (.saqib on)
+  AI_ENABLED: String(process.env.AI_ENABLED || 'true') === 'true',
+  AI_TIMEOUT_MS: num(process.env.AI_TIMEOUT_MS, 20_000),
+  AI_HISTORY_TURNS: num(process.env.AI_HISTORY_TURNS, 8),
+
   // Outbound network guard
   FETCH_TIMEOUT_MS: num(process.env.FETCH_TIMEOUT_MS, 120000),
 

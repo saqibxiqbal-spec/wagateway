@@ -36,6 +36,7 @@ const config = require('../config');
 const { getDb } = require('../db');
 const { useMongoAuthState, clearAuth } = require('./authState');
 const { attachCommands } = require('./commands');
+const { attachAIAgent } = require('./aiAgent');
 
 const COLL = 'wa_sessions';
 const EVENTS = 'wa_events';
@@ -570,7 +571,9 @@ class WaManager extends EventEmitter {
         },
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
-        markOnlineOnConnect: false,
+        // Appear online so messages are DELIVERED (double grey tick). We never
+        // call readMessages(), so the sender never gets a blue tick.
+        markOnlineOnConnect: config.ALWAYS_ONLINE,
         // Keep the handshake snappy and the link healthy.
         connectTimeoutMs: 20_000,
         defaultQueryTimeoutMs: 60_000,
@@ -675,6 +678,14 @@ class WaManager extends EventEmitter {
       logger.warn({ err: err.message }, 'attachCommands failed');
     }
 
+    // --- AI auto-reply agent (.saqib on) ---------------------------------
+    try {
+      runtime.detachAgent = attachAIAgent(sock, { sessionId, logger });
+      runtime.agentAttached = true;
+    } catch (err) {
+      logger.warn({ err: err.message }, 'attachAIAgent failed');
+    }
+
     return runtime;
   }
 
@@ -710,12 +721,27 @@ class WaManager extends EventEmitter {
       });
       await this.logEvent(runtime.docId, 'connected', { id: me?.id });
       this.emit('connected', { userId: runtime.userId, sessionId, me });
+
+      // --- Always-online presence -----------------------------------------
+      // `available` makes the account show online and lets WhatsApp deliver
+      // messages (double grey tick). We deliberately NEVER send read receipts,
+      // so the other side never sees a blue tick.
+      if (config.ALWAYS_ONLINE) {
+        const ping = () =>
+          runtime.sock?.sendPresenceUpdate('available').catch(() => {});
+        ping();
+        clearInterval(runtime.presenceTimer);
+        runtime.presenceTimer = setInterval(ping, config.PRESENCE_INTERVAL_MS);
+        if (runtime.presenceTimer.unref) runtime.presenceTimer.unref();
+      }
       return;
     }
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const reason = lastDisconnect?.error?.message || 'connection closed';
+      clearInterval(runtime.presenceTimer);
+      runtime.presenceTimer = null;
       this.runtimes.delete(sessionId);
 
       // 401 — user logged the device out from their phone. Terminal.

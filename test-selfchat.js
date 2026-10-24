@@ -84,7 +84,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // 4. .menu works
   emit('M3', '.menu');
   await sleep(200);
-  check('.menu returns list', sent.some((s) => /SAQIB MD/.test(s.content.text || '')));
+  check(
+    '.menu returns list (image + caption)',
+    sent.some((s) => /SAQIB MD/.test(s.content.text || s.content.caption || ''))
+  );
 
   // 5. .calc
   emit('M4', '.calc 25*4');

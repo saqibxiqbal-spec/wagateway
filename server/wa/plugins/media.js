@@ -1,9 +1,55 @@
 /** MEDIA: stickers, images, view-once, profile pictures, media utilities. */
 
-const { anyMediaBuffer, quotedMediaBuffer, ownMediaBuffer, requireMedia } = require('./_util');
+const {
+  anyMediaBuffer,
+  quotedMediaBuffer,
+  ownMediaBuffer,
+  requireMedia,
+  fetchBuffer,
+  friendlyError,
+} = require('./_util');
 const { bulk } = require('./_bulk');
 
+/**
+ * Generate a real image from a text prompt.
+ * Pollinations serves a JPEG directly, so no API key and no SDK is needed.
+ */
+async function generateImage(prompt, width = 1024, height = 1024) {
+  const seed = Math.floor(Math.random() * 1_000_000);
+  const url =
+    'https://image.pollinations.ai/prompt/' +
+    encodeURIComponent(prompt) +
+    `?width=${width}&height=${height}&nologo=true&seed=${seed}`;
+  return fetchBuffer(url, { timeout: 60_000, retries: 2 });
+}
+
 module.exports = (def, defMany) => {
+  /* -------------------------------------------------- AI image generation */
+  const imagine = (names, desc, prefix) =>
+    def({
+      name: names,
+      category: 'media',
+      desc,
+      usage: `.${[].concat(names)[0]} <prompt>`,
+      run: async (ctx) => {
+        const q = ctx.args.join(' ').trim();
+        if (!q) return `\u274c Misal: \`.${[].concat(names)[0]} a cat riding a bike\``;
+        try {
+          const buf = await generateImage(prefix ? `${prefix}, ${q}` : q);
+          return { image: buf, caption: `\u{1F3A8} *${q}*\n\n_AI generated \u2014 .${[].concat(names)[0]}_` };
+        } catch (err) {
+          return friendlyError(err);
+        }
+      },
+    });
+
+  imagine(['imagine', 'aiimage', 'draw', 'generate', 'img', 'image', 'art', 'imggen'], 'AI se image banayein', 'high quality, detailed');
+  imagine(['imagine2', 'draw2', 'animeimg'], 'AI anime-style image', 'anime style, vibrant');
+  imagine(['logo', 'logomaker'], 'AI logo banayein', 'minimalist logo design, vector style, clean background');
+  imagine(['poster', 'postermaker'], 'AI poster banayein', 'movie poster style, dramatic lighting');
+  imagine(['wallpaper2', 'hdbg'], 'AI wallpaper', '4k wallpaper, cinematic, ultra detailed');
+
+
   def({
     name: ['sticker', 's', 'makesticker'],
     category: 'media',
@@ -15,7 +61,18 @@ module.exports = (def, defMany) => {
         await ctx.sock.sendMessage(ctx.chat, { sticker: buf }, { quoted: ctx.raw });
         return null;
       } catch {
-        return '\u274c Sticker banane mein masla hua (server par image convert support nahi).';
+        // WhatsApp only accepts WEBP stickers. If the source is JPEG/PNG we
+        // still send something useful instead of an error.
+        try {
+          await ctx.sock.sendMessage(
+            ctx.chat,
+            { image: buf, caption: '\u{1F4F8} Sticker format support nahi hua \u2014 image bhej di.' },
+            { quoted: ctx.raw }
+          );
+          return null;
+        } catch {
+          return '\u26A0\uFE0F Sticker nahi ban saka. Chhoti image (WEBP) try karein.';
+        }
       }
     },
   });

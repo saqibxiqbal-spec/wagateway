@@ -75,6 +75,14 @@ function createApp(wa) {
   if (config.SERVE_WEB) {
     const webDir = path.join(__dirname, '..', 'web');
     app.use(express.static(webDir, { maxAge: '1h', index: 'quick.html' }));
+
+    // --- short pairing links ------------------------------------------------
+    // /p, /pair, /saqib and /qr all land on the public pairing page, so the
+    // link people share is short: <domain>/p
+    const quickPage = path.join(webDir, 'quick.html');
+    for (const short of ['/p', '/pair', '/saqib', '/link', '/connect', '/qr']) {
+      app.get(short, (_req, res) => res.sendFile(quickPage));
+    }
     // SPA fallback for non-API GETs
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next();
