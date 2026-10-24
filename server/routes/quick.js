@@ -144,9 +144,13 @@ router.get(
     const sid = String(s.id || s._id);
     const { commands } = require('../wa/commands');
     const aiAgent = require('../wa/aiAgent');
+    const modeStore = require('../wa/mode');
+    const providers = require('../wa/aiProviders');
     const rt = wa.runtimes && wa.runtimes.get(sid);
     const commandsAttached = !!(rt && rt.commandsAttached);
     const aiOn = await aiAgent.isEnabled(sid).catch(() => false);
+    const mode = await modeStore.getMode(sid).catch(() => 'public');
+    const engines = providers.status();
     const doc = await wa.col.findOne({ _id: s._id || s.id });
     res.json({
       ok: true,
@@ -162,6 +166,9 @@ router.get(
       aiAgentOn: aiOn,
       alwaysOnline: config.ALWAYS_ONLINE,
       autoRead: config.AUTO_READ,
+      mode,
+      ownerNumber: config.OWNER_NUMBER,
+      aiEngines: engines,
       leaseOwner: doc ? doc.lockOwner || null : null,
       thisInstance: wa.instanceId || null,
       me: s.me || null,
