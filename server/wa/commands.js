@@ -18,6 +18,7 @@
 const registry = require('./plugins');
 const { friendlyError } = require('./plugins/_util');
 const config = require('../config');
+const modeStore = require('./mode');
 
 const PREFIXES = registry.PREFIXES;
 const BOT_NAME = registry.BOT_NAME;
@@ -170,6 +171,20 @@ function attachCommands(sock, opts = {}) {
         const senderJid = isGroup ? raw.key.participant : chat;
         const senderNumber = jidToNumber(senderJid);
 
+        // Owner = configured OWNER_NUMBER, the bot's own account, or self-chat.
+        const isOwner =
+          senderNumber === config.OWNER_NUMBER ||
+          isSelfChat ||
+          (Boolean(botPn) && senderNumber === botPn) ||
+          (Boolean(botLid) && senderNumber === botLid);
+
+        // `.mode private` → only the owner may run commands. `.mode` itself is
+        // always reachable so the owner can switch back from anywhere.
+        if (!isOwner && entry.name !== 'mode') {
+          const currentMode = await modeStore.getMode(sessionId);
+          if (currentMode === 'private') continue;
+        }
+
         // Lazy group metadata — only when the command actually needs it.
         let groupMetadata = null;
         if (isGroup && (entry.group || entry.admin || NEEDS_GROUP_META.has(entry.category))) {
@@ -211,7 +226,7 @@ function attachCommands(sock, opts = {}) {
           botJid: sock.user?.id || '',
           sessionId,
           command: entry.name,
-          isOwner: senderNumber === config.OWNER_NUMBER,
+          isOwner,
           isAdmin: false,
           logger: log,
           reply: (t) => sock.sendMessage(chat, { text: t }, { quoted: raw }),

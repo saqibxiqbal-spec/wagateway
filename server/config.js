@@ -42,6 +42,18 @@ const config = {
   AI_TIMEOUT_MS: num(process.env.AI_TIMEOUT_MS, 20_000),
   AI_HISTORY_TURNS: num(process.env.AI_HISTORY_TURNS, 8),
 
+  // AI providers — tried in this order, first one that answers wins.
+  // Leave a key empty to disable that provider.
+  DEEPSEEK_API_KEY: (process.env.DEEPSEEK_API_KEY || '').trim(),
+  DEEPSEEK_MODEL: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  GEMINI_API_KEY: (process.env.GEMINI_API_KEY || '').trim(),
+  GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-flash-lite-latest',
+  OPENAI_API_KEY: (process.env.OPENAI_API_KEY || '').trim(),
+  OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+
+  // Access mode default: 'public' (everyone) or 'private' (owner only).
+  DEFAULT_MODE: String(process.env.DEFAULT_MODE || 'public').toLowerCase() === 'private' ? 'private' : 'public',
+
   // Outbound network guard
   FETCH_TIMEOUT_MS: num(process.env.FETCH_TIMEOUT_MS, 120000),
 

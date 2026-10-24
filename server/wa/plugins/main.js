@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { humanUptime, jidToNumber } = require('./_util');
 const aiAgent = require('../aiAgent');
+const modeStore = require('../mode');
 
 /** Bot avatar, loaded once and reused for every menu send. */
 let BOT_IMAGE = null;
@@ -249,6 +250,46 @@ module.exports = (def) => {
         '`.saqib on` \u2014 auto AI reply chalu\n' +
         '`.saqib off` \u2014 band\n' +
         '`.saqib clear` \u2014 memory clear'
+      );
+    },
+  });
+
+  // ---------------------------------------------------------------- .mode
+  def({
+    name: ['mode', 'public', 'private'],
+    category: 'main',
+    desc: 'Bot access mode — public (sab) ya private (sirf owner)',
+    usage: '.mode public | .mode private | .mode',
+    run: async (ctx) => {
+      const arg = (ctx.args[0] || '').toLowerCase();
+      const sid = ctx.sessionId;
+
+      if (arg === 'public' || arg === 'open' || arg === 'all' || arg === 'everyone') {
+        if (!ctx.isOwner) return '\u{1F512} Sirf owner mode badal sakta hai.';
+        await modeStore.setMode(sid, 'public');
+        return (
+          '\u{1F30D} *MODE: PUBLIC*\n\n' +
+          'Ab har WhatsApp user bot ki har command chala sakta hai.\n\n' +
+          '_Wapas band karne ke liye:_ `.mode private`'
+        );
+      }
+
+      if (arg === 'private' || arg === 'close' || arg === 'owner' || arg === 'me') {
+        if (!ctx.isOwner) return '\u{1F512} Sirf owner mode badal sakta hai.';
+        await modeStore.setMode(sid, 'private');
+        return (
+          '\u{1F510} *MODE: PRIVATE*\n\n' +
+          'Ab sirf owner (aap) commands chala sakte hain.\n' +
+          'Baqi sab ki commands bilkul ignore hongi.\n\n' +
+          '_Wapas kholne ke liye:_ `.mode public`'
+        );
+      }
+
+      const mode = await modeStore.getMode(sid);
+      return (
+        `\u2699\uFE0F *Bot Mode:* ${mode === 'private' ? '\u{1F510} PRIVATE' : '\u{1F30D} PUBLIC'}\n\n` +
+        '`.mode public` \u2014 sab ke liye khula\n' +
+        '`.mode private` \u2014 sirf owner ke liye'
       );
     },
   });

@@ -9,6 +9,7 @@
  */
 const { EventEmitter } = require('events');
 const { attachCommands } = require('./server/wa/commands');
+const modeStore = require('./server/wa/mode');
 
 function makeSock(number) {
   const ev = new EventEmitter();
@@ -132,6 +133,44 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   });
   await sleep(150);
   check('stale history message ignored', sent.length === b6);
+
+  // 11. .mode status shows public by default
+  const b7 = sent.length;
+  emit('M9', '.mode');
+  await sleep(200);
+  check('.mode shows PUBLIC by default', sent.slice(b7).some((s) => /PUBLIC/.test(s.content.text || '')));
+
+  // 12. private mode blocks strangers but keeps self-chat working
+  await modeStore.setMode('test', 'private');
+  const b8 = sent.length;
+  emit('M10', '.ping', { fromMe: false, jid: '923009999999@s.whatsapp.net' });
+  await sleep(200);
+  check('private mode blocks other users', sent.length === b8, `added=${sent.length - b8}`);
+
+  const b9 = sent.length;
+  emit('M11', '.ping');
+  await sleep(200);
+  check('private mode still allows owner (self-chat)', sent.length > b9);
+
+  // 13. non-owner cannot switch mode
+  const b10 = sent.length;
+  emit('M12', '.mode public', { fromMe: false, jid: '923009999999@s.whatsapp.net' });
+  await sleep(200);
+  check(
+    'non-owner cannot change mode',
+    sent.slice(b10).some((s) => /owner/i.test(s.content.text || '')) &&
+      (await modeStore.getMode('test')) === 'private'
+  );
+
+  // 14. owner can switch back to public
+  emit('M13', '.mode public');
+  await sleep(200);
+  check('owner switches back to PUBLIC', (await modeStore.getMode('test')) === 'public');
+
+  const b11 = sent.length;
+  emit('M14', '.ping', { fromMe: false, jid: '923009999999@s.whatsapp.net' });
+  await sleep(200);
+  check('public mode re-opens for everyone', sent.length > b11);
 
   detach();
   const failed = results.filter((r) => !r.ok);

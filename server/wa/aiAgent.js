@@ -15,6 +15,7 @@
 
 const config = require('../config');
 const db = require('../db');
+const providers = require('./aiProviders');
 
 const SETTINGS = 'wa_settings';
 const memory = new Map(); // `${sessionId}:${chat}` -> [{role, content}]
@@ -107,40 +108,18 @@ async function askOpenAI(messages, timeoutMs) {
   }
 }
 
-/** GET fallback — flattens the conversation into one prompt. */
-async function askGet(messages, timeoutMs) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const prompt = messages.map((m) => `${m.role}: ${m.content}`).join('\n') + '\nassistant:';
-    const r = await fetch(
-      `https://text.pollinations.ai/${encodeURIComponent(prompt)}?model=openai`,
-      { signal: ctl.signal }
-    );
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const text = (await r.text()).trim();
-    if (!text) throw new Error('empty');
-    return text;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
 /**
- * Ask the AI with automatic provider fallback.
+ * Ask the AI. DeepSeek → Gemini → OpenAI → free fallback (see aiProviders).
  * @returns {Promise<string|null>}
  */
 async function askAI(messages, timeoutMs = config.AI_TIMEOUT_MS) {
   const full = [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
-  for (const fn of [askOpenAI, askGet]) {
-    try {
-      const out = await fn(full, timeoutMs);
-      if (out) return out.slice(0, 3500);
-    } catch {
-      /* try the next provider */
-    }
+  try {
+    const res = await providers.ask(full, { timeoutMs, maxChars: 3500 });
+    return res ? res.text : null;
+  } catch {
+    return null;
   }
-  return null;
 }
 
 /* --------------------------------------------------------------- attach */
@@ -220,4 +199,12 @@ function attachAIAgent(sock, opts = {}) {
   };
 }
 
-module.exports = { attachAIAgent, askAI, isEnabled, setEnabled, clearHistory, SYSTEM_PROMPT };
+module.exports = {
+  attachAIAgent,
+  askAI,
+  isEnabled,
+  setEnabled,
+  clearHistory,
+  SYSTEM_PROMPT,
+  providers,
+};
