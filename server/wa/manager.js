@@ -470,7 +470,7 @@ class WaManager extends EventEmitter {
       while (Date.now() < deadline) {
         if (runtime.code) break;
         if (runtime.failed) break;
-        await delay(250);
+        await delay(100);
       }
 
       if (runtime.code) {
@@ -505,7 +505,7 @@ class WaManager extends EventEmitter {
     if (this.runtimes.has(sessionId)) {
       logger.warn({ sessionId }, 'startSocket: killing existing runtime first');
       await this._killRuntime(sessionId);
-      await delay(400);
+      await delay(150);
     }
 
     // --- Cross-instance lease guard ---------------------------------------
@@ -543,12 +543,14 @@ class WaManager extends EventEmitter {
       await this.logEvent(doc._id, 'creds_' + verdict.action, null);
     }
 
-    let version;
-    try {
-      ({ version } = await fetchLatestBaileysVersion());
-    } catch {
-      version = undefined; // Baileys falls back to its bundled version
+    // fetchLatestBaileysVersion() is a network round-trip. Doing it on every
+    // socket start added ~1-3s to the pairing flow, so cache it per process.
+    if (!WaManager._versionPromise) {
+      WaManager._versionPromise = fetchLatestBaileysVersion()
+        .then((r) => r.version)
+        .catch(() => undefined);
     }
+    const version = await WaManager._versionPromise;
 
     let sock;
     try {
@@ -569,6 +571,11 @@ class WaManager extends EventEmitter {
         generateHighQualityLinkPreview: false,
         syncFullHistory: false,
         markOnlineOnConnect: false,
+        // Keep the handshake snappy and the link healthy.
+        connectTimeoutMs: 20_000,
+        defaultQueryTimeoutMs: 60_000,
+        keepAliveIntervalMs: 15_000,
+        retryRequestDelayMs: 250,
         // Retry receipts / decrypt retries ask for the original message again.
         // Returning undefined here makes media and view-once downloads fail.
         getMessage: async (key) => {
@@ -614,11 +621,17 @@ class WaManager extends EventEmitter {
     // digits the user is typing.
     if (!state.creds.registered) {
       const previous = state.creds.pairingCode;
-      const reuse = !wantCode && typeof previous === 'string' && /^[A-Z0-9]{8}$/i.test(previous);
+      // Never re-request a code once WhatsApp has given us an identity: that
+      // restarts the companion handshake and is what made "logging in" hang.
+      const reuse =
+        !wantCode &&
+        !state.creds.me &&
+        typeof previous === 'string' &&
+        /^[A-Z0-9]{8}$/i.test(previous);
       if (wantCode || reuse) {
       (async () => {
         try {
-          await delay(1200); // let the socket reach the handshake stage
+          await delay(400); // let the socket reach the handshake stage
           const code = await sock.requestPairingCode(runtime.number, reuse ? previous : undefined);
           runtime.code = code;
           await this.persist(doc._id, { pairingCode: code, status: STATUS.PAIRING, lastError: null });
@@ -760,7 +773,7 @@ class WaManager extends EventEmitter {
       if (statusCode === DisconnectReason.restartRequired) {
         await this.persist(runtime.docId, { status: STATUS.CONNECTING });
         await this.logEvent(runtime.docId, 'restart_required', { reason });
-        await delay(300);
+        await delay(120);
         this.reconnect(runtime.docId).catch(() => {});
         return;
       }
