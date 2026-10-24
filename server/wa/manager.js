@@ -144,8 +144,11 @@ function sanitizeCreds(creds) {
   if (!creds || !creds.me) return { action: 'none', changed: false };
   const placeholder = !creds.registered && creds.me.name === '~' && !creds.account;
   if (placeholder) {
+    // Only `me` is dropped: it is what makes Baileys send a REGISTRATION node.
+    // `pairingCode` and `pairingEphemeralKeyPair` must survive, because they
+    // are what decrypts the phone's response when the socket reconnects while
+    // a pairing is still in flight.
     delete creds.me;
-    delete creds.pairingCode;
     return { action: 'dropped-placeholder', changed: true };
   }
   if (!creds.registered) {
@@ -605,15 +608,20 @@ class WaManager extends EventEmitter {
     });
 
     // --- Pairing code ----------------------------------------------------
-    // Requested ONLY for an explicit user action. Automatic reconnects skip it
-    // so an in-flight registration is never cancelled by a fresh code.
-    if (!state.creds.registered && wantCode) {
+    // A code is minted only for an explicit user action. On an automatic
+    // reconnect during an unfinished pairing we re-send the SAME code, which
+    // re-establishes the companion_hello handshake without invalidating the
+    // digits the user is typing.
+    if (!state.creds.registered) {
+      const previous = state.creds.pairingCode;
+      const reuse = !wantCode && typeof previous === 'string' && /^[A-Z0-9]{8}$/i.test(previous);
+      if (wantCode || reuse) {
       (async () => {
         try {
           await delay(1200); // let the socket reach the handshake stage
-          const code = await sock.requestPairingCode(runtime.number);
+          const code = await sock.requestPairingCode(runtime.number, reuse ? previous : undefined);
           runtime.code = code;
-          await this.persist(doc._id, { pairingCode: code, status: STATUS.PAIRING });
+          await this.persist(doc._id, { pairingCode: code, status: STATUS.PAIRING, lastError: null });
           await this.logEvent(doc._id, 'pair_code', { code });
           this.emit('pair-code', { userId: runtime.userId, sessionId, code });
         } catch (err) {
@@ -623,6 +631,7 @@ class WaManager extends EventEmitter {
           this.emit('pair-code-error', { userId: runtime.userId, sessionId, error: err.message });
         }
       })();
+      }
     }
 
     sock.ev.on('connection.update', (update) => {

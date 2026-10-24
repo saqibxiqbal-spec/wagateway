@@ -149,6 +149,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('placeholder me is dropped', v.action === 'dropped-placeholder' && !placeholder.me);
   }
   {
+    // While a pairing is still in flight the socket reconnects. The code and
+    // its ephemeral key MUST survive, otherwise the phone's response cannot be
+    // decrypted and the link silently fails ("Connection Terminated by Server").
+    const inFlight = {
+      registered: false,
+      me: { id: '92300@s.whatsapp.net', name: '~' },
+      pairingCode: 'ABCD1234',
+      pairingEphemeralKeyPair: { public: Buffer.from('p'), private: Buffer.from('s') },
+    };
+    sanitizeCreds(inFlight);
+    check(
+      'in-flight pairing code + key survive the placeholder drop',
+      inFlight.pairingCode === 'ABCD1234' && !!inFlight.pairingEphemeralKeyPair && !inFlight.me
+    );
+  }
+  {
     // What configureSuccessfulPairing() actually produces: real me + account,
     // but registered is still false because that flag is set elsewhere.
     const real = {
