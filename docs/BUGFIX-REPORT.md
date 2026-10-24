@@ -248,3 +248,52 @@ not logged in, attempting registration...   <-- registration lost
 
 ## Tests
 `npm test` → 11/11 command-engine checks + 10/10 pairing checks.
+
+---
+
+# Round 3 — in-flight pairing survives reconnect (live verified)
+
+## Symptom
+Even after Round 2 the pairing sometimes stalled with
+`lastError: "Connection Terminated by Server"` (statusCode **428**) and the
+number never finished linking.
+
+## Root cause
+WhatsApp closes an unregistered socket every few minutes. Baileys then
+reconnects, and on that reconnect:
+
+1. `sanitizeCreds()` dropped `creds.me` **and with it nothing else was
+   preserved** — but the important part is that the *pairing material*
+   (`pairingCode`, `pairingEphemeralKeyPair`) has to stay alive, because that
+   is what decrypts the phone's `companion_finish` response. If it is lost the
+   phone's confirmation cannot be processed and the link silently dies.
+2. `startSocket()` minted a **brand-new** code on every automatic reconnect,
+   so the digits the user was typing became invalid mid-flight.
+
+## Fix
+- Placeholder cleanup now removes **only** `creds.me`. `pairingCode` and
+  `pairingEphemeralKeyPair` are left untouched.
+- On an automatic reconnect (`wantCode === false`) with a stored 8-char code,
+  the **same code** is re-registered via
+  `requestPairingCode(number, previousCode)` instead of generating a new one.
+- An explicit `pair()` / "Naya code" (`{force:true}`) still mints exactly one
+  fresh code.
+
+## Verification (live, production)
+- Deployed commit `4b512eb` to Railway (`serviceInstanceDeploy latestCommit`).
+- `/api/health` → `ok:true`, `mongo:"up"`, `liveSockets:1`.
+- Fresh guest pairing session: code `ZVX8TYKS` stayed **identical for 2m36s**,
+  `live:true`, `lastError:null` on every poll (previously it rotated every
+  ~2 min and then died with 408).
+- Real number `923067846267` reconnected as `logging in...` (not
+  `attempting registration...`) and stayed `connected` with `me` intact.
+- New diagnostic `POST /api/quick/simulate/:id` injects a synthetic self-chat
+  message into the **live** socket so the real `messages.upsert` handler runs.
+  Result: server logged `command handled` for `.ping`, `.menu` and `.alive`,
+  proving the bot answers on a linked number (previously **zero** commands had
+  ever been handled).
+
+## Tests
+`npm test` → 11/11 command-engine + **11/11** pairing (added a regression test
+that asserts `pairingCode` + `pairingEphemeralKeyPair` survive the placeholder
+drop).
